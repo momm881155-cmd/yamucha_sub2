@@ -1,3 +1,8 @@
+# goxplorer.py — gofilelab/newest を100ページ巡回して Gofile リンクを収集
+# ・ダウンロード数などの指標は一切使わない
+# ・死にリンクは is_gofile_alive() で必ず排除
+# ・cloudscraper → 0件なら Playwright フォールバック
+
 import os
 import re
 import time
@@ -8,11 +13,11 @@ import cloudscraper
 import requests
 from bs4 import BeautifulSoup
 
-# ★ Playwright フォールバック
+# Playwright フォールバック
 from playwright.sync_api import sync_playwright
 
-# gofilehub: 1〜100ページを網羅
-BASE_LIST_URL = "https://gofilehub.com/newest/?page={page}"
+# ★ 新スクレイピング先（1〜100ページ想定：/newest/?page=2 形式）
+BASE_LIST_URL = "https://gofilelab.com/newest/?page={page}"
 
 # gofile URLパターン（生HTML/スクリプト内も対象）
 GOFILE_RE = re.compile(r"https?://gofile\.io/d/[A-Za-z0-9]+", re.I)
@@ -26,7 +31,7 @@ HEADERS = {
     ),
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
     "Accept-Language": "ja-JP,ja;q=0.9,en-US;q=0.8,en;q=0.7",
-    "Referer": "https://gofilehub.com/newest/",
+    "Referer": "https://gofilelab.com/newest",
     "Connection": "keep-alive",
 }
 
@@ -66,9 +71,9 @@ def _extract_urls_from_html(html: str) -> List[str]:
     urls: List[str] = []
     seen = set()
 
-    soup = BeautifulSoup(html, "html.parser")
+    soup = BeautifulSoup(html or "", "html.parser")
     for a in soup.find_all("a", href=GOFILE_RE):
-        u = fix_scheme(a.get("href", "").strip())
+        u = fix_scheme((a.get("href") or "").strip())
         if u and u not in seen:
             urls.append(u)
             seen.add(u)
@@ -124,14 +129,13 @@ def _fetch_page_with_playwright(url: str, wait_ms: int = 4000) -> str:
 
 def fetch_listing_pages(num_pages: int = 100) -> List[str]:
     """
-    gofilehub の newest を1→num_pagesまで巡回し、URL を収集。
+    gofilelab の newest を1→num_pagesまで巡回し、Gofile URL を収集。
     cloudscraper で試し、0件なら Playwright で再取得。
     """
     scraper = _build_scraper()
     results: List[str] = []
     seen: Set[str] = set()
 
-    # 1ページ目の?page=1 も許容（サイト仕様的には1でも2でもOK）
     for p in range(1, num_pages + 1):
         list_url = BASE_LIST_URL.format(page=p)
         urls: List[str] = []
@@ -174,7 +178,7 @@ def is_gofile_alive(url: str, timeout: int = 20) -> bool:
         r = _get_with_retry(scraper, url, timeout=timeout, max_retry=3)
         text = r.text or ""
         death_markers = [
-            # ★ ご指定の文言（完全一致でなく包含判定）
+            # ご指定のエラーメッセージ類
             "This content does not exist",
             "The content you are looking for could not be found",
             "has been automatically removed",
@@ -194,7 +198,7 @@ def collect_fresh_gofile_urls(
     already_seen: Set[str], want: int = 20, num_pages: int = 100
 ) -> List[str]:
     """
-    gofilehub から gofile リンクを収集し、死にリンクと既知重複を除外して返す。
+    gofilelab から gofile リンクを収集し、死にリンクと既知重複を除外して返す。
     並びは収集順（ページ巡回順）のまま。ダウンロード数等は一切不使用。
     """
     urls = fetch_listing_pages(num_pages=num_pages)
