@@ -1,4 +1,5 @@
 # goxplorer.py — gofilelab/newest を100ページ巡回して Gofile リンクを収集
+# ・年齢確認（Age Gate）を自動突破（複数パターンに対応）
 # ・ダウンロード数などの指標は一切使わない
 # ・死にリンクは is_gofile_alive() で必ず排除
 # ・cloudscraper → 0件なら Playwright フォールバック
@@ -14,10 +15,11 @@ import requests
 from bs4 import BeautifulSoup
 
 # Playwright フォールバック
-from playwright.sync_api import sync_playwright
+from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout
 
-# ★ 新スクレイピング先（1〜100ページ想定：/newest/?page=2 形式）
-BASE_LIST_URL = "https://gofilelab.com/newest/?page={page}"
+# ★ 新スクレイピング先（1〜100ページ想定）
+# 例: 2ページ目 → /newest?page=2 （スラッシュ無しのクエリ形式）
+BASE_LIST_URL = "https://gofilelab.com/newest?page={page}"
 
 # gofile URLパターン（生HTML/スクリプト内も対象）
 GOFILE_RE = re.compile(r"https?://gofile\.io/d/[A-Za-z0-9]+", re.I)
@@ -26,7 +28,7 @@ GOFILE_RE = re.compile(r"https?://gofile\.io/d/[A-Za-z0-9]+", re.I)
 HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "AppleWebKit(KHTML, like Gecko) "
         "Chrome/123.0.0.0 Safari/537.36"
     ),
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
@@ -103,9 +105,53 @@ def _get_with_retry(scraper, url: str, timeout: int = 20, max_retry: int = 4):
             base = 0.9 * (2 ** (attempt - 1))
             time.sleep(base + random.uniform(0, base))
 
+def _bypass_age_gate(page) -> None:
+    """
+    gofilelab の年齢確認を複数手段で突破。
+    - localStorage / cookie にフラグを書き込んでから再読込
+    - それでも残る場合は「同意」「はい」「Enter」「I Agree」などのボタンをクリック
+    """
+    # 1) localStorage フラグで突破（想定キーを複数試す）
+    age_js = """
+    try {
+      localStorage.setItem('ageVerified', '1');
+      localStorage.setItem('adult', 'true');
+      localStorage.setItem('age_verified', 'true');
+      localStorage.setItem('age_verified_at', Date.now().toString());
+    } catch (e) {}
+    """
+    page.evaluate(age_js)
+    page.wait_for_timeout(200)
+    page.reload(wait_until="domcontentloaded", timeout=30000)
+    page.wait_for_timeout(500)
+
+    # 2) 画面上のボタンで突破（存在すれば）
+    selectors = [
+        "text=はい",
+        "text=同意",
+        "text=Enter",
+        "text=I Agree",
+        "text=Agree",
+        "button:has-text('はい')",
+        "button:has-text('同意')",
+        "button:has-text('Enter')",
+        "button:has-text('I Agree')",
+        "[data-testid='age-accept']",
+    ]
+    for sel in selectors:
+        try:
+            btn = page.query_selector(sel)
+            if btn:
+                btn.click()
+                page.wait_for_timeout(400)
+                break
+        except PWTimeout:
+            pass
+
 def _fetch_page_with_playwright(url: str, wait_ms: int = 4000) -> str:
     """
     Playwrightで実ページをレンダリングしてHTMLを取得（JS実行後のDOM）。
+    年齢確認が出たら突破してからHTMLを返す。
     """
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True, args=["--no-sandbox"])
@@ -121,8 +167,21 @@ def _fetch_page_with_playwright(url: str, wait_ms: int = 4000) -> str:
             "Connection": HEADERS["Connection"],
         })
         page.goto(url, wait_until="domcontentloaded", timeout=30000)
+        page.wait_for_timeout(800)
+
+        # 年齢確認を突破（表示されていそうな場合は2回まで）
+        for _ in range(2):
+            html_probe = page.content()
+            if ("年齢確認" in html_probe) or ("Age" in html_probe and "confirm" in html_probe.lower()):
+                _bypass_age_gate(page)
+                page.wait_for_timeout(500)
+            else:
+                break
+
+        # 本文の描画を待つ
         page.wait_for_timeout(wait_ms)
         html = page.content()
+
         context.close()
         browser.close()
         return html
@@ -130,7 +189,7 @@ def _fetch_page_with_playwright(url: str, wait_ms: int = 4000) -> str:
 def fetch_listing_pages(num_pages: int = 100) -> List[str]:
     """
     gofilelab の newest を1→num_pagesまで巡回し、Gofile URL を収集。
-    cloudscraper で試し、0件なら Playwright で再取得。
+    cloudscraper で試し、0件なら Playwright で再取得（Age Gate 突破付き）。
     """
     scraper = _build_scraper()
     results: List[str] = []
@@ -147,7 +206,7 @@ def fetch_listing_pages(num_pages: int = 100) -> List[str]:
         except Exception as e:
             print(f"[warn] cloudscraper page {p} failed: {e}")
 
-        # 2) Playwright フォールバック
+        # 2) Playwright フォールバック（0件の場合のみ）
         if not urls:
             try:
                 html = _fetch_page_with_playwright(list_url)
