@@ -38,9 +38,25 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Install Playwright browsers
+      # ★ Playwrightをキャッシュ（毎回のDLを回避）
+      - name: Cache Playwright browsers
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-v1
+          restore-keys: |
+            playwright-${{ runner.os }}-
+
+      # ★ Playwrightブラウザ導入（ネットワーク不安定対策にリトライ＆プロキシ）
+      - name: Install Playwright browsers (retry)
+        env:
+          HTTP_PROXY: ${{ secrets.HTTP_PROXY }}
+          HTTPS_PROXY: ${{ secrets.HTTPS_PROXY }}
         run: |
-          python -m playwright install --with-deps chromium
+          for i in 1 2 3; do
+            python -m playwright install --with-deps chromium && break
+            echo "retry $i..." && sleep 10
+          done
 
       - name: Run bot
         env:
@@ -50,6 +66,8 @@ jobs:
           X_ACCESS_TOKEN_SECRET: ${{ secrets.X_ACCESS_TOKEN_SECRET }}
           # 画面スクレイピングのためのユーザー名（@なし）。Secrets/Variablesどちらでも可。
           X_SCREEN_NAME: ${{ vars.X_SCREEN_NAME }}
+          # ★ コミュニティ投稿用（どちらかに設定しておけばOK）
+          X_COMMUNITY_ID: ${{ secrets.X_COMMUNITY_ID || vars.X_COMMUNITY_ID }}
           HTTP_PROXY: ${{ secrets.HTTP_PROXY }}
           HTTPS_PROXY: ${{ secrets.HTTPS_PROXY }}
         run: |
