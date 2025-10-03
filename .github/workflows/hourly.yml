@@ -2,10 +2,7 @@ name: Hourly Poster
 
 on:
   schedule:
-    # UTCで 23:00, 11:00, 13:00 → JSTで 08:00, 20:00, 22:00 に相当
-    - cron: "0 23 * * *"
-    - cron: "0 11 * * *"
-    - cron: "0 13 * * *"
+    - cron: "0 * * * *"  # UTCで毎時00分実行（=JST 毎時）
   workflow_dispatch: {}
 
 permissions:
@@ -46,16 +43,18 @@ jobs:
           python -m playwright install --with-deps chromium
 
       - name: Run bot
-        timeout-minutes: 10   # ← 長時間キャンセル防止の保険
+        timeout-minutes: 10   # 長時間キャンセル防止の保険
         env:
           X_API_KEY: ${{ secrets.X_API_KEY }}
           X_API_SECRET: ${{ secrets.X_API_SECRET }}
           X_ACCESS_TOKEN: ${{ secrets.X_ACCESS_TOKEN }}
           X_ACCESS_TOKEN_SECRET: ${{ secrets.X_ACCESS_TOKEN_SECRET }}
+          # タイムラインから既出URLを拾うためのユーザー名（@なし）。任意。
           X_SCREEN_NAME: ${{ vars.X_SCREEN_NAME }}
-          X_COMMUNITY_ID: ${{ secrets.X_COMMUNITY_ID }}
+          # スクレイピング調整（任意）
           SCRAPE_TIMEOUT_SEC: 110
           NUM_PAGES: 100
+          # 任意のプロキシ
           HTTP_PROXY: ${{ secrets.HTTP_PROXY }}
           HTTPS_PROXY: ${{ secrets.HTTPS_PROXY }}
         run: |
