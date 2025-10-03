@@ -4,6 +4,10 @@
 # 2) WP REST API (wp-json/wp/v2/posts) で本文HTMLから抽出（取れれば速い）
 # 3) Playwright で /newest?page=N → 記事詳細へ遷移して抽出（最終手段）
 #
+# 変更点:
+# - サイトマップは BeautifulSoup の "xml" パーサに依存せず、正規表現で <loc> を抽出
+# - そのほかの処理は前版と同等
+#
 # 共通:
 # - 年齢確認UI（☑ + 「同意して閲覧する」）突破 + localStorage/cookie 併用
 # - redirect/out の中間リンクを 1 回だけ解決
@@ -13,8 +17,9 @@
 import os
 import re
 import time
+from html import unescape
 from urllib.parse import urlparse, parse_qs, unquote, urljoin
-from typing import List, Set, Optional, Tuple
+from typing import List, Set, Optional
 
 import cloudscraper
 import requests
@@ -142,7 +147,23 @@ def _extract_gofile_from_html(html: str, scraper) -> List[str]:
             seen.add(u); urls.append(u)
     return urls
 
-# ========= 1) サイトマップからURL収集 =========
+# ========= サイトマップ解析（XMLパーサ不要） =========
+_LOC_RE = re.compile(r"<loc>(.*?)</loc>", re.IGNORECASE | re.DOTALL)
+
+def _extract_locs_from_xml(xml_text: str) -> List[str]:
+    if not xml_text:
+        return []
+    # 文字参照の解除 + 余分な空白除去
+    raw = _LOC_RE.findall(xml_text)
+    locs = []
+    for x in raw:
+        u = unescape(x).strip()
+        # 一部のsitemapは改行や空白を含む場合があるので簡易整形
+        u = u.replace("\n", "").replace("\r", "").replace("\t", "").strip()
+        if u:
+            locs.append(u)
+    return locs
+
 def _fetch_sitemap_post_urls(scraper, max_pages: int, deadline_ts: Optional[float]) -> List[str]:
     urls: List[str] = []
 
@@ -154,21 +175,22 @@ def _fetch_sitemap_post_urls(scraper, max_pages: int, deadline_ts: Optional[floa
         except Exception:
             return None
 
-    # sitemap_index.xml → post系sitemapを探す
+    # sitemap_index.xml → post系sitemapを探す（無ければ /sitemap.xml）
     xml = _get(SITEMAP_INDEX)
     if not xml:
-        # Yoast でない/単一sitemapの場合
         xml = _get(BASE_ORIGIN + "/sitemap.xml")
         if not xml:
             print("[warn] sitemap not available")
             return urls
 
-    soup = BeautifulSoup(xml, "xml")
-    locs = [loc.get_text(strip=True) for loc in soup.find_all("loc")]
-    # post-sitemap.. / post-2025-.. / news-sitemap.. など「post」を含むもの優先
+    locs = _extract_locs_from_xml(xml)
+    if not locs:
+        print("[warn] sitemap had no <loc>")
+        return urls
+
+    # post/news/posts を優先
     post_sitemaps = [u for u in locs if "post" in u or "news" in u or "posts" in u]
     if not post_sitemaps:
-        # 全部候補に（上位のを先に）
         post_sitemaps = locs
 
     collected = 0
@@ -179,9 +201,7 @@ def _fetch_sitemap_post_urls(scraper, max_pages: int, deadline_ts: Optional[floa
         xml2 = _get(sm)
         if not xml2:
             continue
-        s2 = BeautifulSoup(xml2, "xml")
-        entry_locs = [loc.get_text(strip=True) for loc in s2.find_all("loc")]
-        # 新しい順の可能性が高いので末尾からではなく先頭から取る
+        entry_locs = _extract_locs_from_xml(xml2)
         for u in entry_locs:
             if not u.startswith(BASE_ORIGIN):
                 continue
@@ -224,7 +244,6 @@ def _collect_via_sitemap(num_pages: int, deadline_ts: Optional[float]) -> List[s
         added_total += added
         if i % 20 == 0:
             print(f"[info] sitemap detail {i} posts processed, got {added_total} gofiles (total {len(all_urls)})")
-        # 軽めの間隔
         time.sleep(0.15)
     return all_urls
 
@@ -241,7 +260,6 @@ def _collect_via_wp_api(num_pages: int, deadline_ts: Optional[float]) -> List[st
         api = WP_POSTS_API.format(page=p)
         try:
             r = s.get(api, timeout=12)
-            # Cloudflare HTMLが返ると JSON 失敗することがあるのでチェック
             ctype = r.headers.get("Content-Type", "")
             if "json" not in ctype:
                 raise ValueError("non-json returned")
@@ -287,6 +305,7 @@ def _playwright_ctx(pw):
     return context
 
 def _bypass_age_gate(page) -> None:
+    # localStorage で既読扱い
     js = """
     try {
       localStorage.setItem('ageVerified', '1');
