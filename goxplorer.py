@@ -1,23 +1,27 @@
-# goxplorer.py — gofilelab/newest を最大100ページ巡回して Gofile リンクを収集
-# ・Age Gate 突破（localStorage + ボタン）
-# ・redirect/out 短縮リンクを1回だけ解決し gofile.io/d/... を抽出
-# ・ダウンロード数は不使用、死にリンクは厳密排除
-# ・cloudscraper → 0件なら Playwright フォールバック
-# ・deadline_sec で全体に締め切り
+# goxplorer.py — gofilelab/newest を巡回し、各記事ページまで入って gofile リンクを抽出
+# 仕様:
+# ・一覧 (/newest?page=N) から記事URLを収集 → 各記事詳細を開いて gofile.io/d/... を抽出
+# ・Age Gate を自動突破（localStorage + ボタン押下）
+# ・gofilelab の redirect/out などの中間リンクを 1 回だけ解決して gofile に正規化
+# ・死にリンクは厳密に除外
+# ・cloudscraper（軽量）→ 0件やJS必要時は Playwright で再取得
+# ・全体締め切り deadline_sec を bot から渡せる
 
 import os
 import re
 import time
 import random
-from urllib.parse import urlparse, parse_qs, unquote
-from typing import List, Set, Optional
+from urllib.parse import urlparse, parse_qs, unquote, urljoin
+from typing import List, Set, Optional, Tuple
 
 import cloudscraper
 import requests
 from bs4 import BeautifulSoup
 from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout
 
-BASE_LIST_URL = "https://gofilelab.com/newest?page={page}"
+BASE_ORIGIN = "https://gofilelab.com"
+BASE_LIST_URL = BASE_ORIGIN + "/newest?page={page}"
+
 GOFILE_RE = re.compile(r"https?://gofile\.io/d/[A-Za-z0-9]+", re.I)
 
 HEADERS = {
@@ -28,11 +32,11 @@ HEADERS = {
     ),
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
     "Accept-Language": "ja-JP,ja;q=0.9,en-US;q=0.8,en;q=0.7",
-    "Referer": "https://gofilelab.com/newest",
+    "Referer": BASE_ORIGIN + "/newest",
     "Connection": "keep-alive",
 }
 
-# ---- 共通 ----
+# ===== 共通ユーティリティ =====
 def _build_scraper():
     proxies = {}
     http_p = os.getenv("HTTP_PROXY") or os.getenv("http_proxy")
@@ -59,7 +63,7 @@ def _now() -> float:
 def _deadline_passed(deadline_ts: Optional[float]) -> bool:
     return deadline_ts is not None and _now() >= deadline_ts
 
-# ---- 中間リンク解決 ----
+# ===== 中間リンク解決（redirect/out → gofile） =====
 def _resolve_to_gofile(url: str, scraper, timeout: int = 8) -> Optional[str]:
     if not url:
         return None
@@ -79,7 +83,7 @@ def _resolve_to_gofile(url: str, scraper, timeout: int = 8) -> Optional[str]:
     except Exception:
         pass
 
-    # 2) /out/xxx → 302 Location を見る
+    # 2) /out/xxx → 302 Location をみる（リダイレクトは追わずにヘッダだけ）
     try:
         r = scraper.get(url, timeout=timeout, allow_redirects=False)
         loc = r.headers.get("Location") or r.headers.get("location")
@@ -96,13 +100,13 @@ def _resolve_to_gofile(url: str, scraper, timeout: int = 8) -> Optional[str]:
         return fix_scheme(m.group(0))
     return None
 
-# ---- HTML抽出 ----
-def _extract_urls_from_html(html: str, scraper) -> List[str]:
+# ===== HTML から gofile 抽出（中間リンク対応） =====
+def _extract_gofile_from_html(html: str, scraper) -> List[str]:
     urls: List[str] = []
     seen = set()
     soup = BeautifulSoup(html or "", "html.parser")
 
-    # a タグすべて（href/各data属性）
+    # a タグの href / data-* を総なめ
     for a in soup.find_all("a"):
         href = (a.get("href") or "").strip()
         if href:
@@ -121,14 +125,57 @@ def _extract_urls_from_html(html: str, scraper) -> List[str]:
                 if go2 and go2 not in seen:
                     urls.append(go2); seen.add(go2)
 
-    # 生HTML（script含む）にも保険
+    # 生HTML（script含む）の直書きも保険で拾う
     for m in GOFILE_RE.findall(html or ""):
         u = fix_scheme(m.strip())
         if u and u not in seen:
             urls.append(u); seen.add(u)
     return urls
 
-# ---- ネット/Playwright/年齢確認 ----
+# ===== HTML から “記事ページURL” を抽出 =====
+def _extract_article_links_from_list(html: str) -> List[str]:
+    """
+    一覧ページから、各記事（詳細）への内部リンクを推定して抽出。
+    - /newest?page=... などの自己参照や、/category/, /tag/ は除外
+    - 単純に gofilelab.com ドメイン内の <a> を網羅し、パラメータ名やパスでスコアリング
+    """
+    soup = BeautifulSoup(html or "", "html.parser")
+    links: List[str] = []
+    seen = set()
+
+    for a in soup.find_all("a", href=True):
+        href = a["href"].strip()
+        if not href or href.startswith("#"):
+            continue
+        # 絶対/相対を問わず絶対化
+        url = urljoin(BASE_ORIGIN, href)
+        pr = urlparse(url)
+
+        # ドメイン外は除外
+        if pr.netloc and not pr.netloc.endswith("gofilelab.com"):
+            continue
+
+        # 明らかな一覧/ナビは除外
+        bad_substr = ("/newest", "/category/", "/tag/", "/page/", "/?page=", "/search", "/author")
+        if any(x in pr.path for x in bad_substr):
+            # ただし /newest?page= は一覧自身なのでスキップ
+            if "/newest" in pr.path:
+                continue
+        # 拡張子でナビ/ファイルっぽいものを軽く除外
+        if pr.path.endswith((".jpg", ".png", ".gif", ".webp", ".svg", ".css", ".js", ".zip", ".rar")):
+            continue
+
+        # 記事らしいURL長/構造に軽いスコア（だいたい /something/some-post/ のような形）
+        # ここでは厳しく絞らず、後段で gofile が見つからなければ無視されるだけ
+        key = url
+        if key not in seen:
+            seen.add(key)
+            links.append(url)
+
+    # 重いサイト対策：過剰に多い場合は先頭 50 件まで
+    return links[:50]
+
+# ===== ネット/Playwright/年齢確認 =====
 def _get_with_retry(scraper, url: str, timeout: int = 10, max_retry: int = 3):
     for attempt in range(1, max_retry + 1):
         try:
@@ -152,7 +199,7 @@ def _bypass_age_gate(page) -> None:
     } catch (e) {}
     """
     page.evaluate(js)
-    page.wait_for_timeout(160)
+    page.wait_for_timeout(150)
     page.reload(wait_until="domcontentloaded", timeout=20000)
     page.wait_for_timeout(200)
 
@@ -171,7 +218,7 @@ def _bypass_age_gate(page) -> None:
         except PWTimeout:
             pass
 
-def _fetch_page_with_playwright(url: str, wait_ms: int = 1000) -> str:
+def _fetch_with_playwright(url: str, wait_ms: int = 900) -> str:
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True, args=["--no-sandbox"])
         context = browser.new_context(user_agent=HEADERS["User-Agent"], locale="ja-JP")
@@ -189,7 +236,7 @@ def _fetch_page_with_playwright(url: str, wait_ms: int = 1000) -> str:
         for _ in range(2):
             probe = page.content()
             if ("年齢" in probe and "確認" in probe) or ("I am over" in probe) or ("Agree" in probe):
-                _bypass_age_gate(page); page.wait_for_timeout(300)
+                _bypass_age_gate(page); page.wait_for_timeout(280)
             else:
                 break
 
@@ -198,11 +245,32 @@ def _fetch_page_with_playwright(url: str, wait_ms: int = 1000) -> str:
         context.close(); browser.close()
         return html
 
-# ---- 一覧巡回 ----
+# ===== 一覧巡回 → 記事詳細 → gofile抽出 =====
+def _collect_from_detail(detail_url: str, scraper) -> List[str]:
+    # 1) 軽量に cloudscraper → 0件なら Playwright
+    try:
+        r = _get_with_retry(scraper, detail_url, timeout=10, max_retry=2)
+        urls = _extract_gofile_from_html(r.text, scraper)
+        if urls:
+            return urls
+    except Exception as e:
+        print(f"[warn] detail cloudscraper failed: {detail_url} ({e})")
+
+    try:
+        html = _fetch_with_playwright(detail_url, wait_ms=900)
+        return _extract_gofile_from_html(html, scraper)
+    except Exception as e:
+        print(f"[warn] detail playwright failed: {detail_url} ({e})")
+        return []
+
 def fetch_listing_pages(num_pages: int = 100, deadline_ts: Optional[float] = None) -> List[str]:
+    """
+    一覧ページを巡回し、そこから記事リンクを収集→各記事で gofile を抽出し、一覧順で返す。
+    """
     scraper = _build_scraper()
     results: List[str] = []
-    seen: Set[str] = set()
+    seen_urls: Set[str] = set()   # gofile 重複排除
+    seen_posts: Set[str] = set()  # 記事URL重複排除
 
     for p in range(1, num_pages + 1):
         if _deadline_passed(deadline_ts):
@@ -210,31 +278,49 @@ def fetch_listing_pages(num_pages: int = 100, deadline_ts: Optional[float] = Non
             break
 
         list_url = BASE_LIST_URL.format(page=p)
-        urls: List[str] = []
+        article_urls: List[str] = []
 
+        # 1) 一覧ページHTMLの取得
+        html = ""
         try:
-            r = _get_with_retry(scraper, list_url, timeout=10, max_retry=3)
-            urls = _extract_urls_from_html(r.text, scraper)
+            r = _get_with_retry(scraper, list_url, timeout=10, max_retry=2)
+            html = r.text
         except Exception as e:
-            print(f"[warn] cloudscraper page {p} failed: {e}")
+            print(f"[warn] cloudscraper list page {p} failed: {e}")
 
-        if not urls and not _deadline_passed(deadline_ts):
+        # 2) cloudscraper で記事URLが取れないなら Playwright
+        if not html:
             try:
-                html = _fetch_page_with_playwright(list_url, wait_ms=1000)
-                urls = _extract_urls_from_html(html, scraper)
+                html = _fetch_with_playwright(list_url, wait_ms=800)
             except Exception as e:
-                print(f"[warn] playwright page {p} failed: {e}")
+                print(f"[warn] playwright list page {p} failed: {e}")
+                html = ""
 
+        if html:
+            article_urls = _extract_article_links_from_list(html)
+
+        # 3) 各記事に入って gofile を抽出
         added = 0
-        for u in urls:
-            if u not in seen:
-                results.append(u); seen.add(u); added += 1
+        for post_url in article_urls:
+            if _deadline_passed(deadline_ts):
+                break
+            if post_url in seen_posts:
+                continue
+            seen_posts.add(post_url)
+
+            urls = _collect_from_detail(post_url, scraper)
+            for u in urls:
+                if u not in seen_urls:
+                    results.append(u)
+                    seen_urls.add(u)
+                    added += 1
 
         print(f"[info] page {p}: extracted {added} new urls (total {len(results)})")
-        time.sleep(0.8)
+        time.sleep(0.6)  # サイト負荷軽減
+
     return results
 
-# ---- 死活判定 ----
+# ===== 死活判定 =====
 def is_gofile_alive(url: str, timeout: int = 12) -> bool:
     url = fix_scheme(url)
     scraper = _build_scraper()
@@ -257,7 +343,7 @@ def is_gofile_alive(url: str, timeout: int = 12) -> bool:
     except Exception:
         return False
 
-# ---- 収集メイン ----
+# ===== 収集メイン =====
 def collect_fresh_gofile_urls(
     already_seen: Set[str], want: int = 20, num_pages: int = 100, deadline_sec: Optional[int] = None
 ) -> List[str]:
