@@ -54,9 +54,11 @@ jobs:
           X_ACCESS_TOKEN_SECRET: ${{ secrets.X_ACCESS_TOKEN_SECRET }}
           # タイムラインから既出URLを拾うためのユーザー名（@なし）。任意。
           X_SCREEN_NAME: ${{ vars.X_SCREEN_NAME }}
-          # スクレイピング調整（任意）
-          SCRAPE_TIMEOUT_SEC: 110
+          # スクレイピング調整（強化）
+          SCRAPE_TIMEOUT_SEC: 150   # ← 110→150 に延長
           NUM_PAGES: 100
+          RAW_LIMIT: 120            # ← 収集の早期打ち切り上限を拡大（既定40→120）
+          FILTER_LIMIT: 64          # ← 生存判定に回す最大件数（既定18→64）
           # 任意のプロキシ
           HTTP_PROXY: ${{ secrets.HTTP_PROXY }}
           HTTPS_PROXY: ${{ secrets.HTTPS_PROXY }}
