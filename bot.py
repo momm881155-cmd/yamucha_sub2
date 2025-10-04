@@ -67,14 +67,14 @@ def reset_if_new_day(state, now_jst):
         state["posts_today"] = 0
 
 def within_posting_window(now_jst):
-    # ★ 「1時間に1回 / 1日16投稿まで」なので時間帯制限はナシ
     return True
 
 def can_post_more_today(state):
     return state.get("posts_today", 0) < DAILY_LIMIT
 
-def purge_recent_24h(state, now_utc: datetime):
-    cutoff = now_utc - timedelta(hours=24)
+# ====== ★ 修正箇所：12時間保持に変更 ======
+def purge_recent_12h(state, now_utc: datetime):
+    cutoff = now_utc - timedelta(hours=12)
     buf = []
     for item in state.get("recent_urls_24h", []):
         try:
@@ -84,6 +84,7 @@ def purge_recent_24h(state, now_utc: datetime):
         if ts >= cutoff:
             buf.append(item)
     state["recent_urls_24h"] = buf
+# =========================================
 
 # ===== 正規化＆除外集合 =====
 def normalize_url(u: str) -> str:
@@ -95,7 +96,6 @@ def normalize_url(u: str) -> str:
     return u
 
 def build_seen_set_from_state(state) -> set:
-    # 既出扱いは「投稿済み」と「直近24hバッファ」のみ
     seen = set()
     for u in state.get("posted_urls", []):
         seen.add(normalize_url(u))
@@ -110,7 +110,6 @@ def estimate_tweet_len_tco(text: str) -> int:
     return len(replaced)
 
 def is_alive_retry(url: str, retries: int = 1, delay_sec: float = 0.5) -> bool:
-    # 軽リトライで一時的なエラーに強く
     for i in range(retries + 1):
         if is_gofile_alive(url):
             return True
@@ -118,19 +117,8 @@ def is_alive_retry(url: str, retries: int = 1, delay_sec: float = 0.5) -> bool:
             time.sleep(delay_sec)
     return False
 
-# ===== ツイート本文（Gofile×5本＋Amazon×4本を交互、通し番号付き） =====
+# ===== ツイート本文生成 =====
 def compose_fixed5_text(gofile_urls, start_seq: int, salt_idx: int = 0, add_sig: bool = True):
-    """
-    出力イメージ：
-      65​. https://gofile.io/d/XXXXXX
-      https://amzn.to/3Kq0QGm
-      66​. https://gofile.io/d/YYYYYY
-      https://amzn.to/3Kq0QGm
-      ...
-      69​. https://gofile.io/d/WWWWWW
-      https://amzn.to/3Kq0QGm
-      70​. https://gofile.io/d/ZZZZZZ
-    """
     invis = INVISIBLES[salt_idx % len(INVISIBLES)]
     lines = []
     seq = start_seq
@@ -138,7 +126,6 @@ def compose_fixed5_text(gofile_urls, start_seq: int, salt_idx: int = 0, add_sig:
     sel = gofile_urls[:take]
     for i, u in enumerate(sel):
         lines.append(f"{seq}{invis}. {u}")
-        # 間にアフィリンクを4本（最後には挟まない）
         if i < take - 1:
             lines.append(AFFILIATE_URL)
         seq += 1
@@ -217,7 +204,6 @@ def fetch_recent_urls_via_web(username: str, scrolls: int = 3, wait_ms: int = 10
     return seen
 
 def post_to_x_v2(client, status_text: str):
-    # ★ タイムライン（通常ツイート）に投稿
     return client.create_tweet(text=status_text)
 
 # ===== main =====
@@ -228,7 +214,7 @@ def main():
     now_jst = now_utc.astimezone(JST)
 
     state = load_state()
-    purge_recent_24h(state, now_utc)
+    purge_recent_12h(state, now_utc)  # ★ ここを変更
     reset_if_new_day(state, now_jst)
 
     if not within_posting_window(now_jst):
@@ -238,10 +224,8 @@ def main():
         print("Daily limit reached; skip.")
         return
 
-    # 1) state由来の既知重複
     already_seen = build_seen_set_from_state(state)
 
-    # 2) タイムライン既出（API→Web）
     client = get_client()
     timeline_seen = set()
     username = None
@@ -256,11 +240,10 @@ def main():
     if timeline_seen:
         already_seen |= timeline_seen
 
-    # 3) 収集
     if time.monotonic() - start_ts > HARD_LIMIT_SEC:
         print("[warn] time budget exceeded before collection; abort.")
         return
-    # 締切は環境変数 SCRAPE_TIMEOUT_SEC（未設定時は goxplorer 側デフォルトで処理）
+
     try:
         deadline_env = os.getenv("SCRAPE_TIMEOUT_SEC")
         deadline_sec = int(deadline_env) if deadline_env else None
@@ -269,7 +252,7 @@ def main():
 
     candidates = collect_fresh_gofile_urls(
         already_seen=already_seen,
-        want=25,           # 余裕を持って収集
+        want=25,
         num_pages=int(os.getenv("NUM_PAGES", "100")),
         deadline_sec=deadline_sec
     )
@@ -278,7 +261,6 @@ def main():
         print("Not enough fresh URLs found; skip.")
         return
 
-    # 4) 直前チェックだけで5本を組む（必要なら追加収集）
     target = 5
     tested = set()
     preflight = []
@@ -318,31 +300,27 @@ def main():
         save_state(state)
         return
 
-    # 5) 本文生成（Gofile×5本＋Amazon×4本）
     start_seq = int(state.get("line_seq", 1))
     salt = (now_jst.hour + now_jst.minute) % len(INVISIBLES)
     status_text, taken = compose_fixed5_text(preflight, start_seq=start_seq, salt_idx=salt, add_sig=True)
 
-    # 280字調整
     if estimate_tweet_len_tco(status_text) > TWEET_LIMIT:
         status_text = status_text.replace(". https://", ".https://")
     while estimate_tweet_len_tco(status_text) > TWEET_LIMIT:
         status_text = status_text.rstrip(ZWSP + ZWNJ)
 
-    # 6) 投稿（通常ツイート）
     for attempt in range(3):
         try:
             resp = post_to_x_v2(client, status_text)
             tweet_id = resp.data.get("id") if resp and resp.data else None
             print(f"[info] tweeted id={tweet_id}")
 
-            # 7) 状態更新（投稿に使ったURLのみ既出扱い）
             for u in preflight[:5]:
                 if u not in state["posted_urls"]:
                     state["posted_urls"].append(u)
                 state["recent_urls_24h"].append({"url": u, "ts": now_utc.isoformat()})
             state["posts_today"] = state.get("posts_today", 0) + 1
-            state["line_seq"] = start_seq + taken  # 5進み
+            state["line_seq"] = start_seq + taken
             save_state(state)
             print(f"Posted (5 gofiles + 4 amazon):", status_text)
             return
