@@ -2,10 +2,7 @@ name: Hourly Poster
 
 on:
   schedule:
-    # JST 08:00 (= 前日 23:00 UTC)
-    - cron: "0 23 * * *"
-    # JST 09:00〜23:00 (= 当日 00:00〜14:00 UTC)
-    - cron: "0 0-14 * * *"
+    - cron: "0 * * * *"  # UTCで毎時00分実行（=JST 毎時）
   workflow_dispatch: {}
 
 permissions:
@@ -54,11 +51,11 @@ jobs:
           X_ACCESS_TOKEN_SECRET: ${{ secrets.X_ACCESS_TOKEN_SECRET }}
           # タイムラインから既出URLを拾うためのユーザー名（@なし）。任意。
           X_SCREEN_NAME: ${{ vars.X_SCREEN_NAME }}
-          # スクレイピング調整（強化）
-          SCRAPE_TIMEOUT_SEC: 150   # ← 110→150 に延長
+          # スクレイピング調整
+          SCRAPE_TIMEOUT_SEC: 300   # ← フィルタ猶予を3分に延ばす
+          RAW_LIMIT: 100            # ← 一度に収集する件数を増やす
+          FILTER_LIMIT: 50          # ← 死活判定に回す件数を増やす
           NUM_PAGES: 100
-          RAW_LIMIT: 120            # ← 収集の早期打ち切り上限を拡大（既定40→120）
-          FILTER_LIMIT: 64          # ← 生存判定に回す最大件数（既定18→64）
           # 任意のプロキシ
           HTTP_PROXY: ${{ secrets.HTTP_PROXY }}
           HTTPS_PROXY: ${{ secrets.HTTPS_PROXY }}
