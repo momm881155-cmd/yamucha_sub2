@@ -43,7 +43,8 @@ jobs:
           python -m playwright install --with-deps chromium
 
       - name: Run bot
-        timeout-minutes: 10   # 長時間キャンセル防止の保険
+        # timeout-minutes は保険として残します。長すぎる場合は 5 に下げてもOK
+        timeout-minutes: 10
         env:
           X_API_KEY: ${{ secrets.X_API_KEY }}
           X_API_SECRET: ${{ secrets.X_API_SECRET }}
@@ -51,10 +52,7 @@ jobs:
           X_ACCESS_TOKEN_SECRET: ${{ secrets.X_ACCESS_TOKEN_SECRET }}
           # タイムラインから既出URLを拾うためのユーザー名（@なし）。任意。
           X_SCREEN_NAME: ${{ vars.X_SCREEN_NAME }}
-          # スクレイピング調整
-          SCRAPE_TIMEOUT_SEC: 300   # ← フィルタ猶予を3分に延ばす
-          RAW_LIMIT: 100            # ← 一度に収集する件数を増やす
-          FILTER_LIMIT: 50          # ← 死活判定に回す件数を増やす
+          # 収集ページ数（任意）
           NUM_PAGES: 100
           # 任意のプロキシ
           HTTP_PROXY: ${{ secrets.HTTP_PROXY }}
