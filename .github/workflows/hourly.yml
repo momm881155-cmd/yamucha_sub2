@@ -32,6 +32,7 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+          cache: "pip"  # 依存インストール高速化
 
       - name: Install deps
         run: |
@@ -43,8 +44,7 @@ jobs:
           python -m playwright install --with-deps chromium
 
       - name: Run bot
-        # timeout-minutes は保険として残します。長すぎる場合は 5 に下げてもOK
-        timeout-minutes: 10
+        timeout-minutes: 6   # ← 上限を短縮して無駄な待ち時間を抑制
         env:
           X_API_KEY: ${{ secrets.X_API_KEY }}
           X_API_SECRET: ${{ secrets.X_API_SECRET }}
@@ -52,8 +52,14 @@ jobs:
           X_ACCESS_TOKEN_SECRET: ${{ secrets.X_ACCESS_TOKEN_SECRET }}
           # タイムラインから既出URLを拾うためのユーザー名（@なし）。任意。
           X_SCREEN_NAME: ${{ vars.X_SCREEN_NAME }}
-          # 収集ページ数（任意）
-          NUM_PAGES: 100
+
+          # --- 実行時間短縮用の軽量プロファイル（goxplorer.py が参照）---
+          SCRAPE_TIMEOUT_SEC: 90   # 全体の締切（秒）
+          RAW_LIMIT: 40            # 荒取り件数
+          FILTER_LIMIT: 18         # 死活判定に回す件数
+          NUM_PAGES: 40            # 巡回ページ上限
+          # -------------------------------------------------------------
+
           # 任意のプロキシ
           HTTP_PROXY: ${{ secrets.HTTP_PROXY }}
           HTTPS_PROXY: ${{ secrets.HTTPS_PROXY }}
