@@ -1,13 +1,14 @@
 # goxplorer.py — gofilelab/newest スクレイパ（早期打ち切り＋超軽量死活判定）
 # 目的:
-# - まず 40 件だけ素早く収集（RAW_LIMIT）
-# - 先頭 18 件だけ超軽量フィルタ（FILTER_LIMIT）→ 3 本集まったら即返す
+# - まず RAW_LIMIT 件だけ素早く収集（環境変数で調整可能、デフォルト100）
+# - 先頭 FILTER_LIMIT 件だけ超軽量フィルタ → 既出除外＆死活OKから want 本揃った時点で即返す
 # - 死活判定は 1 回だけ ≤0.5s GET、先頭 1.5KB に死亡確定文言があれば False。
 #   タイムアウト/403/503 などは “死と断定不可” → True（=投稿候補OK）
 #
 # 環境変数（任意）:
-#   RAW_LIMIT=40        収集時の上限（多すぎると締め切りに負ける）
-#   FILTER_LIMIT=18     フィルタに回す最大件数
+#   RAW_LIMIT=100        収集時の上限
+#   FILTER_LIMIT=50      フィルタに回す最大件数
+#   SCRAPE_TIMEOUT_SEC   フィルタ処理の締め切り秒（botから未指定時に参照）
 #
 # 依存は requirements.txt のまま。
 
@@ -43,8 +44,9 @@ HEADERS = {
     "Connection": "keep-alive",
 }
 
-RAW_LIMIT      = int(os.getenv("RAW_LIMIT", "40"))
-FILTER_LIMIT   = int(os.getenv("FILTER_LIMIT", "18"))
+# ★ 最小変更ポイント1: 環境変数で上限を調整（デフォルト強化）
+RAW_LIMIT    = int(os.getenv("RAW_LIMIT", "100"))
+FILTER_LIMIT = int(os.getenv("FILTER_LIMIT", "50"))
 
 def _build_scraper():
     proxies = {}
@@ -401,6 +403,15 @@ def fetch_listing_pages(num_pages: int = 100, deadline_ts: Optional[float] = Non
 def collect_fresh_gofile_urls(
     already_seen: Set[str], want: int = 3, num_pages: int = 100, deadline_sec: Optional[int] = None
 ) -> List[str]:
+    # ★ 最小変更ポイント2: bot側未指定なら環境変数 SCRAPE_TIMEOUT_SEC を自動採用
+    if deadline_sec is None:
+        _env = os.getenv("SCRAPE_TIMEOUT_SEC")
+        try:
+            if _env:
+                deadline_sec = int(_env)
+        except Exception:
+            deadline_sec = None
+
     deadline_ts = (_now() + deadline_sec) if deadline_sec else None
     raw = fetch_listing_pages(num_pages=num_pages, deadline_ts=deadline_ts)
 
