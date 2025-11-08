@@ -43,7 +43,7 @@ jobs:
         run: |
           python -m playwright install --with-deps chromium
 
-            - name: Run bot
+      - name: Run bot
         timeout-minutes: 12
         env:
           # 追加（URL切替）
