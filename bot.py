@@ -31,7 +31,7 @@ ZWNJ = "\u200C"
 INVISIBLES = [ZWSP, ZWNJ]
 
 # 実行時間の上限（ウォッチドッグ）
-HARD_LIMIT_SEC = 180  # 3分
+HARD_LIMIT_SEC = 600  # 3分
 
 # ===== state =====
 def _default_state():
