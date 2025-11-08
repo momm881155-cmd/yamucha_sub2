@@ -34,33 +34,81 @@ jobs:
           python-version: "3.11"
           cache: "pip"  # 依存インストール高速化
 
-      - name: Install deps
+      - name: Install deps & Playwright
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
-
-      - name: Install Playwright browsers
-        run: |
           python -m playwright install --with-deps chromium
 
-      - name: Run bot
-        timeout-minutes: 6   # ← 上限を短縮して無駄な待ち時間を抑制
+      # === 1) gofilelab ===
+      - name: Run bot (gofilelab)
+        timeout-minutes: 12
         env:
+          BASE_ORIGIN: "https://gofilelab.com"
+          BASE_LIST_URL: "https://gofilelab.com/newest?page={page}"
+          PAGE1_URL: "https://gofilelab.com/newest"
+
+          # --- 実行時間/件数（必要に応じて調整）---
+          SCRAPE_TIMEOUT_SEC: 300   # 全体の締切（秒） 例: 300〜600
+          RAW_LIMIT: 40             # 荒取り件数
+          FILTER_LIMIT: 18          # 死活判定に回す件数
+          NUM_PAGES: 100            # 巡回ページ上限（bot.pyが参照している前提）
+          # --------------------------------------
+
+          # X/Twitter（必要な場合）
           X_API_KEY: ${{ secrets.X_API_KEY }}
           X_API_SECRET: ${{ secrets.X_API_SECRET }}
           X_ACCESS_TOKEN: ${{ secrets.X_ACCESS_TOKEN }}
           X_ACCESS_TOKEN_SECRET: ${{ secrets.X_ACCESS_TOKEN_SECRET }}
-          # タイムラインから既出URLを拾うためのユーザー名（@なし）。任意。
           X_SCREEN_NAME: ${{ vars.X_SCREEN_NAME }}
 
-          # --- 実行時間短縮用の軽量プロファイル（goxplorer.py が参照）---
-          SCRAPE_TIMEOUT_SEC: 90   # 全体の締切（秒）
-          RAW_LIMIT: 40            # 荒取り件数
-          FILTER_LIMIT: 18         # 死活判定に回す件数
-          NUM_PAGES: 40            # 巡回ページ上限
-          # -------------------------------------------------------------
-
           # 任意のプロキシ
+          HTTP_PROXY: ${{ secrets.HTTP_PROXY }}
+          HTTPS_PROXY: ${{ secrets.HTTPS_PROXY }}
+        run: |
+          python bot.py
+
+      # === 2) nsnn.net ===
+      - name: Run bot (nsnn.net)
+        timeout-minutes: 12
+        env:
+          BASE_ORIGIN: "https://nsnn.net"
+          BASE_LIST_URL: "https://nsnn.net/gofile.io?page={page}&sort=newtest"
+          PAGE1_URL: "https://nsnn.net/gofile.io?page=1&sort=newtest"
+
+          SCRAPE_TIMEOUT_SEC: 300
+          RAW_LIMIT: 40
+          FILTER_LIMIT: 18
+          NUM_PAGES: 100
+
+          X_API_KEY: ${{ secrets.X_API_KEY }}
+          X_API_SECRET: ${{ secrets.X_API_SECRET }}
+          X_ACCESS_TOKEN: ${{ secrets.X_ACCESS_TOKEN }}
+          X_ACCESS_TOKEN_SECRET: ${{ secrets.X_ACCESS_TOKEN_SECRET }}
+          X_SCREEN_NAME: ${{ vars.X_SCREEN_NAME }}
+          HTTP_PROXY: ${{ secrets.HTTP_PROXY }}
+          HTTPS_PROXY: ${{ secrets.HTTPS_PROXY }}
+        run: |
+          python bot.py
+
+      # === 3) orevideo ===
+      - name: Run bot (orevideo)
+        timeout-minutes: 12
+        env:
+          BASE_ORIGIN: "https://orevideo.pythonanywhere.com"
+          BASE_LIST_URL: "https://orevideo.pythonanywhere.com/?sort=newest&page={page}"
+          PAGE1_URL: "https://orevideo.pythonanywhere.com/?sort=newest&page=1"
+
+          SCRAPE_TIMEOUT_SEC: 300
+          RAW_LIMIT: 40
+          FILTER_LIMIT: 18
+          NUM_PAGES: 100
+
+          X_API_KEY: ${{ secrets.X_API_KEY }}
+          X_API_SECRET: ${{ secrets.X_API_SECRET }}
+          X_ACCESS_TOKEN: ${{ secrets.X_ACCESS_TOKEN }}
+          X_ACCESS_TOKEN_SECRET: ${{ secrets.X_ACCESS_TOKEN_SECRET }}
+          X_SCREEN_NAME: ${{ vars.X_SCREEN_NAME }}
           HTTP_PROXY: ${{ secrets.HTTP_PROXY }}
           HTTPS_PROXY: ${{ secrets.HTTPS_PROXY }}
         run: |
