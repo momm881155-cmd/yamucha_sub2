@@ -1,4 +1,4 @@
-# goxplorer.py — gofilelab/newest スクレイパ（早期打ち切り＋超軽量死活判定）
+# goxplorer.py — 汎用/newest スクレイパ（早期打ち切り＋超軽量死活判定）
 # 目的:
 # - まず RAW_LIMIT 件だけ素早く収集（環境変数で調整可能、デフォルト100）
 # - 先頭 FILTER_LIMIT 件だけ超軽量フィルタ → 既出除外＆死活OKから want 本揃った時点で即返す
@@ -9,6 +9,13 @@
 #   RAW_LIMIT=100        収集時の上限
 #   FILTER_LIMIT=50      フィルタに回す最大件数
 #   SCRAPE_TIMEOUT_SEC   フィルタ処理の締め切り秒（botから未指定時に参照）
+#   BASE_ORIGIN          例) https://gofilelab.com / https://nsnn.net / https://orevideo.pythonanywhere.com
+#   BASE_LIST_URL        例) https://gofilelab.com/newest?page={page}
+#                         例) https://nsnn.net/gofile.io?page={page}&sort=newtest
+#                         例) https://orevideo.pythonanywhere.com/?sort=newest&page={page}
+#   PAGE1_URL            例) https://gofilelab.com/newest
+#   WP_POSTS_API         任意: WP-APIがある場合のエンドポイント書式（{page}使用）
+#   SITEMAP_INDEX        任意: サイトマップインデックスURL
 #
 # 依存は requirements.txt のまま。
 
@@ -24,10 +31,14 @@ import requests
 from bs4 import BeautifulSoup
 from playwright.sync_api import sync_playwright
 
-BASE_ORIGIN = "https://gofilelab.com"
-BASE_LIST_URL = BASE_ORIGIN + "/newest?page={page}"
-WP_POSTS_API  = BASE_ORIGIN + "/wp-json/wp/v2/posts?page={page}&per_page=20&_fields=link,content.rendered"
-SITEMAP_INDEX = BASE_ORIGIN + "/sitemap_index.xml"
+# ==== ★ ここを環境変数で切替可能に ====
+BASE_ORIGIN   = os.getenv("BASE_ORIGIN", "https://gofilelab.com")
+BASE_LIST_URL = os.getenv("BASE_LIST_URL", BASE_ORIGIN + "/newest?page={page}")
+PAGE1_URL     = os.getenv("PAGE1_URL",   BASE_ORIGIN + "/newest")
+WP_POSTS_API  = os.getenv("WP_POSTS_API",  BASE_ORIGIN + "/wp-json/wp/v2/posts?page={page}&per_page=20&_fields=link,content.rendered")
+SITEMAP_INDEX = os.getenv("SITEMAP_INDEX", BASE_ORIGIN + "/sitemap_index.xml")
+_BASE_HOST    = urlparse(BASE_ORIGIN).netloc or "gofilelab.com"
+# =====================================
 
 GOFILE_RE = re.compile(r"https?://gofile\.io/d/[A-Za-z0-9]+", re.I)
 _LOC_RE    = re.compile(r"<loc>(.*?)</loc>", re.IGNORECASE | re.DOTALL)
@@ -40,7 +51,7 @@ HEADERS = {
     ),
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
     "Accept-Language": "ja-JP,ja;q=0.9,en-US;q=0.8,en;q=0.7",
-    "Referer": BASE_ORIGIN + "/newest",
+    "Referer": PAGE1_URL,
     "Connection": "keep-alive",
 }
 
@@ -58,9 +69,11 @@ def _build_scraper():
     s = cloudscraper.create_scraper(browser={"browser": "chrome", "platform": "windows", "mobile": False})
     if proxies: s.proxies.update(proxies)
     s.headers.update(HEADERS)
+    # WP-API が HTML を返す盾回避（非破壊・必要時のみ有効）
+    s.headers["Accept"] = "application/json, text/plain, */*"
     try:
-        s.cookies.set("ageVerified", "1", domain="gofilelab.com", path="/")
-        s.cookies.set("adult", "true",   domain="gofilelab.com", path="/")
+        s.cookies.set("ageVerified", "1", domain=_BASE_HOST, path="/")
+        s.cookies.set("adult", "true",   domain=_BASE_HOST, path="/")
     except Exception:
         pass
     return s
@@ -108,7 +121,7 @@ def _resolve_to_gofile(url: str, scraper, timeout: int = 4) -> Optional[str]:
     url = fix_scheme(url)
     try:
         pr = urlparse(url)
-        if pr.netloc.endswith("gofilelab.com"):
+        if pr.netloc.endswith(_BASE_HOST):
             qs = parse_qs(pr.query or "")
             for k in ("url", "u", "target"):
                 if k in qs and qs[k]:
@@ -179,16 +192,19 @@ def _fetch_sitemap_post_urls(scraper, max_pages: int, deadline_ts: Optional[floa
     if not locs:
         print("[warn] sitemap had no <loc>"); return urls
 
-    post_sitemaps = [u for u in locs if "post" in u or "news" in u or "posts" in u] or locs
+    post_sitemaps = [u for u in locs if any(k in u for k in ("post","news","posts","sitemap"))] or locs
     cap = max_pages * 20
     for sm in post_sitemaps:
         if _deadline_passed(deadline_ts): print("[info] sitemap deadline reached; stop."); break
         xml2 = _get(sm)
         if not xml2: continue
         for u in _extract_locs_from_xml(xml2):
-            if u.startswith(BASE_ORIGIN):
-                urls.append(u)
-                if len(urls) >= cap: break
+            try:
+                if urlparse(u).netloc.endswith(_BASE_HOST):
+                    urls.append(u)
+                    if len(urls) >= cap: break
+            except Exception:
+                pass
         if len(urls) >= cap: break
     print(f"[info] sitemap collected {len(urls)} post urls")
     return urls
@@ -220,7 +236,8 @@ def _collect_via_wp_api(num_pages: int, deadline_ts: Optional[float]) -> List[st
         api = WP_POSTS_API.format(page=p)
         try:
             r = s.get(api, timeout=8)
-            if "json" not in (r.headers.get("Content-Type","")): raise ValueError("non-json returned")
+            if "json" not in (r.headers.get("Content-Type","").lower()):
+                raise ValueError("non-json returned")
             arr = r.json()
         except Exception as e:
             print(f"[warn] wp-api page {p} failed: {e}"); break
@@ -250,8 +267,8 @@ def _playwright_ctx(pw):
     """)
     try:
         ctx.add_cookies([
-            {"name": "ageVerified", "value": "1", "domain": "gofilelab.com", "path": "/"},
-            {"name": "adult", "value": "true", "domain": "gofilelab.com", "path": "/"},
+            {"name": "ageVerified", "value": "1", "domain": _BASE_HOST, "path": "/"},
+            {"name": "adult", "value": "true", "domain": _BASE_HOST, "path": "/"},
         ])
     except Exception:
         pass
@@ -307,7 +324,7 @@ def _get_html_pw(url: str, scroll_steps: int = 6, wait_ms: int = 600) -> str:
             "Connection": HEADERS["Connection"],
         })
 
-        page.goto(BASE_ORIGIN, wait_until="domcontentloaded", timeout=20000)
+        page.goto(PAGE1_URL, wait_until="domcontentloaded", timeout=20000)
         _bypass_age_gate(page)
 
         page.goto(url, wait_until="domcontentloaded", timeout=22000)
@@ -333,15 +350,15 @@ def _extract_article_links_from_list(html: str) -> List[str]:
             if url not in seen:
                 seen.add(url); links.append(url)
 
-    # セーフティ: 内部リンクでノイズ除外
+    # セーフティ: 内部リンクでノイズ除外（/page/ は除外しすぎ防止のため残す）
     if len(links) < 12:
         for a in soup.find_all("a", href=True):
             href = a["href"].strip()
             if not href or href.startswith("#"): continue
             url = urljoin(BASE_ORIGIN, href)
             pr = urlparse(url)
-            if pr.netloc and not pr.netloc.endswith("gofilelab.com"): continue
-            bad = ("/newest","/category/","/tag/","/page/","/search","/author","/feed","/privacy","/contact")
+            if pr.netloc and not pr.netloc.endswith(_BASE_HOST): continue
+            bad = ("/newest","/category/","/tag/","/search","/author","/feed","/privacy","/contact")
             if any(x in pr.path for x in bad): continue
             if pr.path.endswith((".jpg",".png",".gif",".webp",".svg",".css",".js",".zip",".rar",".pdf",".xml")): continue
             if url not in seen:
@@ -358,6 +375,9 @@ def _collect_via_playwright(num_pages: int, deadline_ts: Optional[float]) -> Lis
             print(f"[info] pw deadline at list page {p}; stop."); break
 
         list_url = BASE_LIST_URL.format(page=p)
+        if p == 1:
+            list_url = PAGE1_URL
+
         try:
             lhtml = _get_html_pw(list_url, scroll_steps=6, wait_ms=600)
         except Exception as e:
