@@ -44,25 +44,25 @@ jobs:
           python -m playwright install --with-deps chromium
 
       - name: Run bot
-        timeout-minutes: 12
+        timeout-minutes: 6   # ← 上限を短縮して無駄な待ち時間を抑制
         env:
-          # 追加（URL切替）
-          BASE_LIST_URL: "https://gofilelab.com/newest/page/{page}/"
-          PAGE1_URL: "https://gofilelab.com/newest/"
-
-          SCRAPE_TIMEOUT_SEC: 300
-          RAW_LIMIT: 40
-          FILTER_LIMIT: 18
-          NUM_PAGES: 100
-
           X_API_KEY: ${{ secrets.X_API_KEY }}
           X_API_SECRET: ${{ secrets.X_API_SECRET }}
           X_ACCESS_TOKEN: ${{ secrets.X_ACCESS_TOKEN }}
           X_ACCESS_TOKEN_SECRET: ${{ secrets.X_ACCESS_TOKEN_SECRET }}
+          # タイムラインから既出URLを拾うためのユーザー名（@なし）。任意。
           X_SCREEN_NAME: ${{ vars.X_SCREEN_NAME }}
+
+          # --- 実行時間短縮用の軽量プロファイル（goxplorer.py が参照）---
+          SCRAPE_TIMEOUT_SEC: 90   # 全体の締切（秒）
+          RAW_LIMIT: 40            # 荒取り件数
+          FILTER_LIMIT: 18         # 死活判定に回す件数
+          NUM_PAGES: 40            # 巡回ページ上限
+          # -------------------------------------------------------------
+
+          # 任意のプロキシ
           HTTP_PROXY: ${{ secrets.HTTP_PROXY }}
           HTTPS_PROXY: ${{ secrets.HTTPS_PROXY }}
-
         run: |
           python bot.py
 
