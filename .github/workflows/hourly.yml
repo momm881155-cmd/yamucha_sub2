@@ -40,15 +40,16 @@ jobs:
 
       # === 1) gofilelab ===
       - name: Run bot (gofilelab)
+        id: gofilelab
         timeout-minutes: 12
         env:
           BASE_ORIGIN: "https://gofilelab.com"
-          BASE_LIST_URL: "https://gofilelab.com/newest/page/{page}/"
+          BASE_LIST_URL: "https://gofilelab.com/newest/page/{page}/"  # 正しいリストURL形式
           PAGE1_URL: "https://gofilelab.com/newest/"
           SCRAPE_TIMEOUT_SEC: 600
           RAW_LIMIT: 40
           FILTER_LIMIT: 18
-          NUM_PAGES: 20   # ← 巡回上限を20に変更
+          NUM_PAGES: 20   # gofilelabは20ページまで巡回
           X_API_KEY: ${{ secrets.X_API_KEY }}
           X_API_SECRET: ${{ secrets.X_API_SECRET }}
           X_ACCESS_TOKEN: ${{ secrets.X_ACCESS_TOKEN }}
@@ -57,10 +58,18 @@ jobs:
           HTTP_PROXY: ${{ secrets.HTTP_PROXY }}
           HTTPS_PROXY: ${{ secrets.HTTPS_PROXY }}
         run: |
-          python bot.py
+          set -e
+          python bot.py | tee bot_gofilelab.log
+          if grep -q "tweeted id=" bot_gofilelab.log; then
+            echo "posted=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "posted=false" >> "$GITHUB_OUTPUT"
+          fi
 
-      # === 2) nsnn.net ===
+      # === 2) nsnn.net ===（前サイトでツイート成功ならスキップ）
       - name: Run bot (nsnn.net)
+        id: nsnn
+        if: steps.gofilelab.outputs.posted != 'true'
         timeout-minutes: 12
         env:
           BASE_ORIGIN: "https://nsnn.net"
@@ -69,7 +78,7 @@ jobs:
           SCRAPE_TIMEOUT_SEC: 600
           RAW_LIMIT: 40
           FILTER_LIMIT: 18
-          NUM_PAGES: 20   # ← ここも20に変更
+          NUM_PAGES: 40   # ★ nsnnだけ40ページまで巡回
           X_API_KEY: ${{ secrets.X_API_KEY }}
           X_API_SECRET: ${{ secrets.X_API_SECRET }}
           X_ACCESS_TOKEN: ${{ secrets.X_ACCESS_TOKEN }}
@@ -78,19 +87,27 @@ jobs:
           HTTP_PROXY: ${{ secrets.HTTP_PROXY }}
           HTTPS_PROXY: ${{ secrets.HTTPS_PROXY }}
         run: |
-          python bot.py
+          set -e
+          python bot.py | tee bot_nsnn.log
+          if grep -q "tweeted id=" bot_nsnn.log; then
+            echo "posted=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "posted=false" >> "$GITHUB_OUTPUT"
+          fi
 
-      # === 3) orevideo ===
+      # === 3) orevideo ===（前2サイトのいずれかでツイート成功ならスキップ）
       - name: Run bot (orevideo)
+        id: orevideo
+        if: steps.gofilelab.outputs.posted != 'true' && steps.nsnn.outputs.posted != 'true'
         timeout-minutes: 12
         env:
           BASE_ORIGIN: "https://orevideo.pythonanywhere.com"
-          BASE_LIST_URL: "https://orevideo.pythonanywhere.com/?sort=newest&page={page}"
-          PAGE1_URL: "https://orevideo.pythonanywhere.com/?sort=newest&page=1"
+          BASE_LIST_URL: "https://orevideo.pythonanywhere.com/?page={page}&sort=newest"  # 実URLの順序に合わせる
+          PAGE1_URL: "https://orevideo.pythonanywhere.com/?page=1&sort=newest"
           SCRAPE_TIMEOUT_SEC: 600
           RAW_LIMIT: 40
           FILTER_LIMIT: 18
-          NUM_PAGES: 20   # ← ここも20に変更
+          NUM_PAGES: 20   # orevideoは20ページまで
           X_API_KEY: ${{ secrets.X_API_KEY }}
           X_API_SECRET: ${{ secrets.X_API_SECRET }}
           X_ACCESS_TOKEN: ${{ secrets.X_ACCESS_TOKEN }}
@@ -99,9 +116,15 @@ jobs:
           HTTP_PROXY: ${{ secrets.HTTP_PROXY }}
           HTTPS_PROXY: ${{ secrets.HTTPS_PROXY }}
         run: |
-          python bot.py
+          set -e
+          python bot.py | tee bot_orevideo.log
+          if grep -q "tweeted id=" bot_orevideo.log; then
+            echo "posted=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "posted=false" >> "$GITHUB_OUTPUT"
+          fi
 
-      # === Commit state ===
+      # === Commit state ===（常に1回だけ）
       - name: Commit state
         if: always()
         env:
