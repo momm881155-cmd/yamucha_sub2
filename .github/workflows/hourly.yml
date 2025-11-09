@@ -2,11 +2,11 @@ name: Hourly Poster
 
 on:
   schedule:
-    - cron: "0 * * * *"  # UTCで毎時00分実行（=JST 毎時）
+    - cron: "0 * * * *"   # UTC 毎時00分（= JST 毎時）
   workflow_dispatch: {}
 
 permissions:
-  contents: write  # state.json をコミットするため
+  contents: write
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -38,29 +38,36 @@ jobs:
           pip install -r requirements.txt
           python -m playwright install --with-deps chromium
 
-      # === 1) gofilelab（軽く当ててダメなら即次へ） ===
+      # === 1) gofilelab ===
       - name: Run bot (gofilelab)
         id: gofilelab
-        timeout-minutes: 8
+        timeout-minutes: 10
         env:
           BASE_ORIGIN: "https://gofilelab.com"
-          BASE_LIST_URL: "https://gofilelab.com/newest/page/{page}/"
-          PAGE1_URL: "https://gofilelab.com/newest/"
-          # 収集・フィルタ
-          SCRAPE_TIMEOUT_SEC: 120
-          RAW_LIMIT: 20
+          BASE_LIST_URL: "https://gofilelab.com/newest?page={page}"   # ← ?page= に戻す
+          PAGE1_URL: "https://gofilelab.com/newest?page=1"
+
+          # 速度/件数
+          SCRAPE_TIMEOUT_SEC: 180
+          RAW_LIMIT: 40
           FILTER_LIMIT: 18
-          NUM_PAGES: 12
-          # X/Twitter
-          USE_API_TIMELINE: "0"     # TLチェックはWeb
-          WAIT_ON_RATE_LIMIT: "0"   # APIで待たない（長時間スリープ回避）
-          HARD_LIMIT_SEC: "240"     # bot.py側のウォッチドッグ
+          NUM_PAGES: 20
+
+          # 即投稿モード
+          WANT_POST: 5
+          MIN_POST: 3
+          USE_API_TIMELINE: 0
+          WAIT_ON_RATE_LIMIT: 0
+          HARD_LIMIT_SEC: 600
+
+          # X keys
           X_API_KEY: ${{ secrets.X_API_KEY }}
           X_API_SECRET: ${{ secrets.X_API_SECRET }}
           X_ACCESS_TOKEN: ${{ secrets.X_ACCESS_TOKEN }}
           X_ACCESS_TOKEN_SECRET: ${{ secrets.X_ACCESS_TOKEN_SECRET }}
           X_SCREEN_NAME: ${{ vars.X_SCREEN_NAME }}
-          # プロキシ（任意）
+
+          # Proxy (optional)
           HTTP_PROXY: ${{ secrets.HTTP_PROXY }}
           HTTPS_PROXY: ${{ secrets.HTTPS_PROXY }}
         run: |
@@ -72,7 +79,7 @@ jobs:
             echo "posted=false" >> "$GITHUB_OUTPUT"
           fi
 
-      # === 2) nsnn.net（主戦場：40ページ） ===
+      # === 2) nsnn.net ===（前サイト成功ならスキップ）
       - name: Run bot (nsnn.net)
         id: nsnn
         if: steps.gofilelab.outputs.posted != 'true'
@@ -81,13 +88,18 @@ jobs:
           BASE_ORIGIN: "https://nsnn.net"
           BASE_LIST_URL: "https://nsnn.net/gofile.io?page={page}&sort=newtest"
           PAGE1_URL: "https://nsnn.net/gofile.io?page=1&sort=newtest"
-          SCRAPE_TIMEOUT_SEC: 300
+
+          SCRAPE_TIMEOUT_SEC: 240
           RAW_LIMIT: 40
           FILTER_LIMIT: 18
-          NUM_PAGES: 40  # nsnnだけ40ページ巡回
-          USE_API_TIMELINE: "0"
-          WAIT_ON_RATE_LIMIT: "0"
-          HARD_LIMIT_SEC: "240"
+          NUM_PAGES: 40   # ← nsnnだけ40ページ
+
+          WANT_POST: 5
+          MIN_POST: 3
+          USE_API_TIMELINE: 0
+          WAIT_ON_RATE_LIMIT: 0
+          HARD_LIMIT_SEC: 600
+
           X_API_KEY: ${{ secrets.X_API_KEY }}
           X_API_SECRET: ${{ secrets.X_API_SECRET }}
           X_ACCESS_TOKEN: ${{ secrets.X_ACCESS_TOKEN }}
@@ -104,22 +116,27 @@ jobs:
             echo "posted=false" >> "$GITHUB_OUTPUT"
           fi
 
-      # === 3) orevideo（補完：20ページ） ===
+      # === 3) orevideo ===（どちらかで成功ならスキップ）
       - name: Run bot (orevideo)
         id: orevideo
         if: steps.gofilelab.outputs.posted != 'true' && steps.nsnn.outputs.posted != 'true'
-        timeout-minutes: 8
+        timeout-minutes: 10
         env:
           BASE_ORIGIN: "https://orevideo.pythonanywhere.com"
           BASE_LIST_URL: "https://orevideo.pythonanywhere.com/?page={page}&sort=newest"
           PAGE1_URL: "https://orevideo.pythonanywhere.com/?page=1&sort=newest"
-          SCRAPE_TIMEOUT_SEC: 180
-          RAW_LIMIT: 20
+
+          SCRAPE_TIMEOUT_SEC: 240
+          RAW_LIMIT: 40
           FILTER_LIMIT: 18
           NUM_PAGES: 20
-          USE_API_TIMELINE: "0"
-          WAIT_ON_RATE_LIMIT: "0"
-          HARD_LIMIT_SEC: "240"
+
+          WANT_POST: 5
+          MIN_POST: 3
+          USE_API_TIMELINE: 0
+          WAIT_ON_RATE_LIMIT: 0
+          HARD_LIMIT_SEC: 600
+
           X_API_KEY: ${{ secrets.X_API_KEY }}
           X_API_SECRET: ${{ secrets.X_API_SECRET }}
           X_ACCESS_TOKEN: ${{ secrets.X_ACCESS_TOKEN }}
@@ -136,7 +153,6 @@ jobs:
             echo "posted=false" >> "$GITHUB_OUTPUT"
           fi
 
-      # === Commit state ===
       - name: Commit state
         if: always()
         env:
@@ -144,12 +160,10 @@ jobs:
         run: |
           set -e
           if [[ ! -f "state.json" ]]; then
-            echo "state.json not found; skip."
-            exit 0
+            echo "state.json not found; skip."; exit 0
           fi
           if git diff --quiet -- state.json; then
-            echo "state.json unchanged; skip commit."
-            exit 0
+            echo "state.json unchanged; skip commit."; exit 0
           fi
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
@@ -161,8 +175,7 @@ jobs:
           git pull --rebase origin "${BRANCH_NAME}" || true
           cp /tmp/state.json.saved state.json
           if git diff --quiet -- state.json; then
-            echo "state.json equal to remote; skip commit."
-            exit 0
+            echo "state.json equal to remote; skip commit."; exit 0
           fi
           git add state.json
           git commit -m "chore: update state $(date -u +'%Y-%m-%dT%H:%M:%SZ')"
