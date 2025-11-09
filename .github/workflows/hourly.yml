@@ -44,17 +44,26 @@ jobs:
         timeout-minutes: 12
         env:
           BASE_ORIGIN: "https://gofilelab.com"
-          BASE_LIST_URL: "https://gofilelab.com/newest/page/{page}/"  # 正しいリストURL形式
+          BASE_LIST_URL: "https://gofilelab.com/newest/page/{page}/"  # gofilelabのリスト形式
           PAGE1_URL: "https://gofilelab.com/newest/"
+
+          # 収集・フィルタ
           SCRAPE_TIMEOUT_SEC: 600
           RAW_LIMIT: 40
           FILTER_LIMIT: 18
-          NUM_PAGES: 20   # gofilelabは20ページまで巡回
+          NUM_PAGES: 20   # gofilelabは20ページまで
+
+          # X/Twitter
+          USE_API_TIMELINE: "0"     # ← TLの重複チェックはWeb固定
+          WAIT_ON_RATE_LIMIT: "0"   # ← API待機しない（長時間スリープ回避）
+          HARD_LIMIT_SEC: "600"     # ← bot.pyのウォッチドッグ
           X_API_KEY: ${{ secrets.X_API_KEY }}
           X_API_SECRET: ${{ secrets.X_API_SECRET }}
           X_ACCESS_TOKEN: ${{ secrets.X_ACCESS_TOKEN }}
           X_ACCESS_TOKEN_SECRET: ${{ secrets.X_ACCESS_TOKEN_SECRET }}
           X_SCREEN_NAME: ${{ vars.X_SCREEN_NAME }}
+
+          # プロキシ（任意）
           HTTP_PROXY: ${{ secrets.HTTP_PROXY }}
           HTTPS_PROXY: ${{ secrets.HTTPS_PROXY }}
         run: |
@@ -75,10 +84,15 @@ jobs:
           BASE_ORIGIN: "https://nsnn.net"
           BASE_LIST_URL: "https://nsnn.net/gofile.io?page={page}&sort=newtest"
           PAGE1_URL: "https://nsnn.net/gofile.io?page=1&sort=newtest"
+
           SCRAPE_TIMEOUT_SEC: 600
           RAW_LIMIT: 40
           FILTER_LIMIT: 18
           NUM_PAGES: 40   # ★ nsnnだけ40ページまで巡回
+
+          USE_API_TIMELINE: "0"
+          WAIT_ON_RATE_LIMIT: "0"
+          HARD_LIMIT_SEC: "600"
           X_API_KEY: ${{ secrets.X_API_KEY }}
           X_API_SECRET: ${{ secrets.X_API_SECRET }}
           X_ACCESS_TOKEN: ${{ secrets.X_ACCESS_TOKEN }}
@@ -102,12 +116,17 @@ jobs:
         timeout-minutes: 12
         env:
           BASE_ORIGIN: "https://orevideo.pythonanywhere.com"
-          BASE_LIST_URL: "https://orevideo.pythonanywhere.com/?page={page}&sort=newest"  # 実URLの順序に合わせる
+          BASE_LIST_URL: "https://orevideo.pythonanywhere.com/?page={page}&sort=newest"  # 実URL順序
           PAGE1_URL: "https://orevideo.pythonanywhere.com/?page=1&sort=newest"
+
           SCRAPE_TIMEOUT_SEC: 600
           RAW_LIMIT: 40
           FILTER_LIMIT: 18
           NUM_PAGES: 20   # orevideoは20ページまで
+
+          USE_API_TIMELINE: "0"
+          WAIT_ON_RATE_LIMIT: "0"
+          HARD_LIMIT_SEC: "600"
           X_API_KEY: ${{ secrets.X_API_KEY }}
           X_API_SECRET: ${{ secrets.X_API_SECRET }}
           X_ACCESS_TOKEN: ${{ secrets.X_ACCESS_TOKEN }}
