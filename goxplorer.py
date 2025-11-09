@@ -1,4 +1,4 @@
-# goxplorer.py — 汎用/newest スクレイパ（早期打ち切り＋超軽量死活判定）
+# goxplorer.py — multi-site対応版（年齢ゲート強化・早期打ち切り・超軽量死活判定）
 # 目的:
 # - まず RAW_LIMIT 件だけ素早く収集（環境変数で調整可能、デフォルト100）
 # - 先頭 FILTER_LIMIT 件だけ超軽量フィルタ → 既出除外＆死活OKから want 本揃った時点で即返す
@@ -6,16 +6,11 @@
 #   タイムアウト/403/503 などは “死と断定不可” → True（=投稿候補OK）
 #
 # 環境変数（任意）:
-#   RAW_LIMIT=100        収集時の上限
-#   FILTER_LIMIT=50      フィルタに回す最大件数
+#   BASE_ORIGIN          対象サイトの origin（例: https://gofilelab.com）
+#   BASE_LIST_URL        一覧URLのフォーマット（例: https://gofilelab.com/newest/page/{page}/）
 #   SCRAPE_TIMEOUT_SEC   フィルタ処理の締め切り秒（botから未指定時に参照）
-#   BASE_ORIGIN          例) https://gofilelab.com / https://nsnn.net / https://orevideo.pythonanywhere.com
-#   BASE_LIST_URL        例) https://gofilelab.com/newest?page={page}
-#                         例) https://nsnn.net/gofile.io?page={page}&sort=newtest
-#                         例) https://orevideo.pythonanywhere.com/?sort=newest&page={page}
-#   PAGE1_URL            例) https://gofilelab.com/newest
-#   WP_POSTS_API         任意: WP-APIがある場合のエンドポイント書式（{page}使用）
-#   SITEMAP_INDEX        任意: サイトマップインデックスURL
+#   RAW_LIMIT=100        荒取りの最大件数
+#   FILTER_LIMIT=50      死活判定に回す最大件数
 #
 # 依存は requirements.txt のまま。
 
@@ -31,18 +26,24 @@ import requests
 from bs4 import BeautifulSoup
 from playwright.sync_api import sync_playwright
 
-# ==== ★ ここを環境変数で切替可能に ====
-BASE_ORIGIN   = os.getenv("BASE_ORIGIN", "https://gofilelab.com")
-BASE_LIST_URL = os.getenv("BASE_LIST_URL", BASE_ORIGIN + "/newest?page={page}")
-PAGE1_URL     = os.getenv("PAGE1_URL",   BASE_ORIGIN + "/newest")
-WP_POSTS_API  = os.getenv("WP_POSTS_API",  BASE_ORIGIN + "/wp-json/wp/v2/posts?page={page}&per_page=20&_fields=link,content.rendered")
-SITEMAP_INDEX = os.getenv("SITEMAP_INDEX", BASE_ORIGIN + "/sitemap_index.xml")
-_BASE_HOST    = urlparse(BASE_ORIGIN).netloc or "gofilelab.com"
-# =====================================
+# ====== サイト設定（環境変数で置換可能） ======
+_DEFAULT_ORIGIN = "https://gofilelab.com"
+BASE_ORIGIN = os.getenv("BASE_ORIGIN", _DEFAULT_ORIGIN).rstrip("/")
+# 代表的な既定値（gofilelab）
+_DEFAULT_LIST_URL = f"{BASE_ORIGIN}/newest?page={{page}}"
+# 例:
+#   gofilelab: https://gofilelab.com/newest/page/{page}/    （テーマにより/page/形式）
+#   nsnn.net : https://nsnn.net/gofile.io?page={page}&sort=newtest
+#   orevideo:  https://orevideo.pythonanywhere.com/?page={page}&sort=newest
+BASE_LIST_URL = os.getenv("BASE_LIST_URL", _DEFAULT_LIST_URL)
+
+WP_POSTS_API  = f"{BASE_ORIGIN}/wp-json/wp/v2/posts?page={{page}}&per_page=20&_fields=link,content.rendered"
+SITEMAP_INDEX = f"{BASE_ORIGIN}/sitemap_index.xml"
 
 GOFILE_RE = re.compile(r"https?://gofile\.io/d/[A-Za-z0-9]+", re.I)
-_LOC_RE    = re.compile(r"<loc>(.*?)</loc>", re.IGNORECASE | re.DOTALL)
+_LOC_RE   = re.compile(r"<loc>(.*?)</loc>", re.IGNORECASE | re.DOTALL)
 
+# ====== HTTPヘッダ ======
 HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -51,11 +52,11 @@ HEADERS = {
     ),
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
     "Accept-Language": "ja-JP,ja;q=0.9,en-US;q=0.8,en;q=0.7",
-    "Referer": PAGE1_URL,
+    "Referer": BASE_ORIGIN,
     "Connection": "keep-alive",
 }
 
-# ★ 最小変更ポイント1: 環境変数で上限を調整（デフォルト強化）
+# ====== 上限パラメータ ======
 RAW_LIMIT    = int(os.getenv("RAW_LIMIT", "100"))
 FILTER_LIMIT = int(os.getenv("FILTER_LIMIT", "50"))
 
@@ -69,11 +70,12 @@ def _build_scraper():
     s = cloudscraper.create_scraper(browser={"browser": "chrome", "platform": "windows", "mobile": False})
     if proxies: s.proxies.update(proxies)
     s.headers.update(HEADERS)
-    # WP-API が HTML を返す盾回避（非破壊・必要時のみ有効）
-    s.headers["Accept"] = "application/json, text/plain, */*"
+
+    # 年齢ゲート用cookie（gofilelab向け）。他サイトでも害はない。
     try:
-        s.cookies.set("ageVerified", "1", domain=_BASE_HOST, path="/")
-        s.cookies.set("adult", "true",   domain=_BASE_HOST, path="/")
+        host = urlparse(BASE_ORIGIN).hostname or "gofilelab.com"
+        s.cookies.set("ageVerified", "1", domain=host, path="/")
+        s.cookies.set("adult", "true",   domain=host, path="/")
     except Exception:
         pass
     return s
@@ -121,7 +123,8 @@ def _resolve_to_gofile(url: str, scraper, timeout: int = 4) -> Optional[str]:
     url = fix_scheme(url)
     try:
         pr = urlparse(url)
-        if pr.netloc.endswith(_BASE_HOST):
+        # gofilelab内の ?url= や target= に gofile が埋まるパターン
+        if pr.netloc and pr.netloc.endswith(urlparse(BASE_ORIGIN).hostname or ""):
             qs = parse_qs(pr.query or "")
             for k in ("url", "u", "target"):
                 if k in qs and qs[k]:
@@ -145,6 +148,7 @@ def _extract_gofile_from_html(html: str, scraper) -> List[str]:
     soup = BeautifulSoup(html or "", "html.parser")
     urls, seen = [], set()
 
+    # a要素から href / data-* を拾う
     for a in soup.find_all("a"):
         href = (a.get("href") or "").strip()
         if href:
@@ -162,6 +166,7 @@ def _extract_gofile_from_html(html: str, scraper) -> List[str]:
                 if go2 and go2 not in seen:
                     seen.add(go2); urls.append(go2)
 
+    # 生テキスト中の gofile も最後に総なめ
     for m in GOFILE_RE.findall(html or ""):
         u = fix_scheme(m.strip())
         if u and u not in seen:
@@ -192,19 +197,16 @@ def _fetch_sitemap_post_urls(scraper, max_pages: int, deadline_ts: Optional[floa
     if not locs:
         print("[warn] sitemap had no <loc>"); return urls
 
-    post_sitemaps = [u for u in locs if any(k in u for k in ("post","news","posts","sitemap"))] or locs
+    post_sitemaps = [u for u in locs if "post" in u or "news" in u or "posts" in u] or locs
     cap = max_pages * 20
     for sm in post_sitemaps:
         if _deadline_passed(deadline_ts): print("[info] sitemap deadline reached; stop."); break
         xml2 = _get(sm)
         if not xml2: continue
         for u in _extract_locs_from_xml(xml2):
-            try:
-                if urlparse(u).netloc.endswith(_BASE_HOST):
-                    urls.append(u)
-                    if len(urls) >= cap: break
-            except Exception:
-                pass
+            if u.startswith(BASE_ORIGIN):
+                urls.append(u)
+                if len(urls) >= cap: break
         if len(urls) >= cap: break
     print(f"[info] sitemap collected {len(urls)} post urls")
     return urls
@@ -236,8 +238,7 @@ def _collect_via_wp_api(num_pages: int, deadline_ts: Optional[float]) -> List[st
         api = WP_POSTS_API.format(page=p)
         try:
             r = s.get(api, timeout=8)
-            if "json" not in (r.headers.get("Content-Type","").lower()):
-                raise ValueError("non-json returned")
+            if "json" not in (r.headers.get("Content-Type","")): raise ValueError("non-json returned")
             arr = r.json()
         except Exception as e:
             print(f"[warn] wp-api page {p} failed: {e}"); break
@@ -252,7 +253,7 @@ def _collect_via_wp_api(num_pages: int, deadline_ts: Optional[float]) -> List[st
         time.sleep(0.12)
     return all_urls[:RAW_LIMIT]
 
-# ====== Playwright（待機強化＋直抽出フォールバック＋早期打ち切り） ======
+# ====== Playwright（年齢ゲート強化＋直抽出フォールバック＋早期打ち切り） ======
 def _playwright_ctx(pw):
     browser = pw.chromium.launch(headless=True, args=[
         "--no-sandbox",
@@ -266,9 +267,10 @@ def _playwright_ctx(pw):
         Object.defineProperty(navigator, 'languages', { get: () => ['ja-JP','ja'] });
     """)
     try:
+        host = urlparse(BASE_ORIGIN).hostname or "gofilelab.com"
         ctx.add_cookies([
-            {"name": "ageVerified", "value": "1", "domain": _BASE_HOST, "path": "/"},
-            {"name": "adult", "value": "true", "domain": _BASE_HOST, "path": "/"},
+            {"name": "ageVerified", "value": "1", "domain": host, "path": "/"},
+            {"name": "adult", "value": "true", "domain": host, "path": "/"},
         ])
     except Exception:
         pass
@@ -282,36 +284,54 @@ def _bypass_age_gate(page):
       localStorage.setItem('adult','true');
       localStorage.setItem('age_verified','true');
       localStorage.setItem('age_verified_at', Date.now().toString());
+      document.cookie = "ageVerified=1; path=/; max-age=31536000";
+      document.cookie = "adult=true; path=/; max-age=31536000";
     } catch(e){}
     """
-    page.evaluate(js); page.wait_for_timeout(120)
+    page.evaluate(js); page.wait_for_timeout(150)
+
+    # チェックボックスがあれば強制チェック
     for sel in [
         "input[type='checkbox']",
+        "form input[type='checkbox']",
+        "[data-age] input[type='checkbox']",
         "label:has-text('18') >> input[type='checkbox']",
         "label:has-text('成人') >> input[type='checkbox']",
-        "label:has-text('同意') >> input[type='checkbox']",
     ]:
         try:
-            cb = page.query_selector(sel)
-            if cb and (bb := cb.bounding_box()) and bb.get("width",0)>0 and bb.get("height",0)>0:
-                cb.click(force=True); page.wait_for_timeout(90); break
+            el = page.query_selector(sel)
+            if el and (bb := el.bounding_box()) and bb.get("width",0)>0 and bb.get("height",0)>0:
+                try:
+                    el.check(force=True)
+                except Exception:
+                    el.click(force=True)
+                page.wait_for_timeout(120); break
         except Exception:
             pass
+
+    # 同意/入場ボタンの揺れを広く吸収
     for sel in [
-        "text=同意して閲覧する","text=同意して入場","text=同意して閲覧",
-        "text=同意する","button:has-text('同意')","text=I Agree","button:has-text('I Agree')",
-        "text=Enter","button:has-text('Enter')",
+        "button:has-text('同意')","button:has-text('入場')",
+        "button:has-text('I Agree')","button:has-text('Enter')",
+        "text=同意して閲覧","text=同意して入場",
+        "text=I am over 18","text=I’m over 18",
+        "[aria-label*='同意']","[aria-label*='18']",
     ]:
         try:
             btn = page.query_selector(sel)
             if btn and (bb := btn.bounding_box()) and bb.get("width",0)>0 and bb.get("height",0)>0:
-                btn.click(force=True); page.wait_for_timeout(140); break
+                btn.click(force=True); page.wait_for_timeout(180); break
         except Exception:
             pass
-    try:
-        page.wait_for_load_state("networkidle", timeout=12000)
-    except Exception:
-        pass
+
+    # オーバーレイが残ってたら除去（安全側）
+    page.evaluate("""
+      for (const sel of ['.modal','[class*="age"]','[id*="age"]','.overlay','.backdrop']) {
+        document.querySelectorAll(sel).forEach(n => { try { n.remove(); } catch(e){} });
+      }
+      document.body.style.overflow = 'auto';
+    """)
+    page.wait_for_timeout(120)
 
 def _get_html_pw(url: str, scroll_steps: int = 6, wait_ms: int = 600) -> str:
     with sync_playwright() as pw:
@@ -324,11 +344,20 @@ def _get_html_pw(url: str, scroll_steps: int = 6, wait_ms: int = 600) -> str:
             "Connection": HEADERS["Connection"],
         })
 
-        page.goto(PAGE1_URL, wait_until="domcontentloaded", timeout=20000)
+        # 先にトップでゲート通過 → 目的URLへ（2段階で確実化）
+        page.goto(BASE_ORIGIN, wait_until="domcontentloaded", timeout=20000)
         _bypass_age_gate(page)
+        try:
+            page.wait_for_load_state("networkidle", timeout=12000)
+        except Exception:
+            pass
 
         page.goto(url, wait_until="domcontentloaded", timeout=22000)
         _bypass_age_gate(page)
+        try:
+            page.wait_for_load_state("networkidle", timeout=12000)
+        except Exception:
+            pass
 
         for _ in range(scroll_steps):
             page.mouse.wheel(0, 1500); page.wait_for_timeout(wait_ms)
@@ -341,8 +370,8 @@ def _extract_article_links_from_list(html: str) -> List[str]:
     soup = BeautifulSoup(html or "", "html.parser")
     links, seen = [], set()
 
-    # 代表セレクタ
-    for sel in ["article a", ".entry-title a", "a[rel='bookmark']"]:
+    # 代表セレクタ（テーマ差を吸収するため複数）
+    for sel in ["article a", ".entry-title a", "a[rel='bookmark']", ".post-card a"]:
         for a in soup.select(sel):
             href = a.get("href")
             if not href: continue
@@ -350,15 +379,15 @@ def _extract_article_links_from_list(html: str) -> List[str]:
             if url not in seen:
                 seen.add(url); links.append(url)
 
-    # セーフティ: 内部リンクでノイズ除外（/page/ は除外しすぎ防止のため残す）
+    # セーフティ: 内部リンクでノイズ除外
     if len(links) < 12:
         for a in soup.find_all("a", href=True):
             href = a["href"].strip()
             if not href or href.startswith("#"): continue
             url = urljoin(BASE_ORIGIN, href)
             pr = urlparse(url)
-            if pr.netloc and not pr.netloc.endswith(_BASE_HOST): continue
-            bad = ("/newest","/category/","/tag/","/search","/author","/feed","/privacy","/contact")
+            if pr.netloc and not pr.netloc.endswith(urlparse(BASE_ORIGIN).hostname or ""): continue
+            bad = ("/newest","/category/","/tag/","/page/","/search","/author","/feed","/privacy","/contact")
             if any(x in pr.path for x in bad): continue
             if pr.path.endswith((".jpg",".png",".gif",".webp",".svg",".css",".js",".zip",".rar",".pdf",".xml")): continue
             if url not in seen:
@@ -375,9 +404,6 @@ def _collect_via_playwright(num_pages: int, deadline_ts: Optional[float]) -> Lis
             print(f"[info] pw deadline at list page {p}; stop."); break
 
         list_url = BASE_LIST_URL.format(page=p)
-        if p == 1:
-            list_url = PAGE1_URL
-
         try:
             lhtml = _get_html_pw(list_url, scroll_steps=6, wait_ms=600)
         except Exception as e:
@@ -386,7 +412,7 @@ def _collect_via_playwright(num_pages: int, deadline_ts: Optional[float]) -> Lis
         article_urls = _extract_article_links_from_list(lhtml) if lhtml else []
         print(f"[info] page {p}: found {len(article_urls)} article links")
 
-        # 詳細に入る（少なくても 1 ページでそこそこ拾えるので、早期に RAW_LIMIT 到達させる）
+        # 詳細に入る（1ページでそこそこ拾えるので、早期に RAW_LIMIT 到達させる）
         added = 0
         for post_url in article_urls:
             if _deadline_passed(deadline_ts): break
@@ -423,7 +449,7 @@ def fetch_listing_pages(num_pages: int = 100, deadline_ts: Optional[float] = Non
 def collect_fresh_gofile_urls(
     already_seen: Set[str], want: int = 3, num_pages: int = 100, deadline_sec: Optional[int] = None
 ) -> List[str]:
-    # ★ 最小変更ポイント2: bot側未指定なら環境変数 SCRAPE_TIMEOUT_SEC を自動採用
+    # bot側未指定なら環境変数 SCRAPE_TIMEOUT_SEC を自動採用
     if deadline_sec is None:
         _env = os.getenv("SCRAPE_TIMEOUT_SEC")
         try:
