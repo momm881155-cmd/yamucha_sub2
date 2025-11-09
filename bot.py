@@ -4,6 +4,9 @@
 # ・本文は Gofile 5件 + Amazonリンク4件を交互（番号はstateで蓄積カウント）
 # ・成功したURLだけ state.json に保存（重複回避は従来どおり）
 # ・収集/死活判定ロジックは goxplorer.py 側に依存（変更なし）
+# ・タイムラインの重複チェックはデフォルトで「Webスクレイプ」
+#   - USE_API_TIMELINE=1 を設定するとAPIで取得（レートに注意）
+# ・APIの待機挙動は WAIT_ON_RATE_LIMIT=1 で有効（デフォルト無効=0）
 
 import json
 import os
@@ -31,7 +34,7 @@ ZWNJ = "\u200C"
 INVISIBLES = [ZWSP, ZWNJ]
 
 # 実行時間の上限（ウォッチドッグ）
-HARD_LIMIT_SEC = 600  # 3分
+HARD_LIMIT_SEC = int(os.getenv("HARD_LIMIT_SEC", "600"))  # 既定10分
 
 # ===== state =====
 def _default_state():
@@ -72,7 +75,7 @@ def within_posting_window(now_jst):
 def can_post_more_today(state):
     return state.get("posts_today", 0) < DAILY_LIMIT
 
-# ====== ★ 修正箇所：12時間保持に変更 ======
+# ====== 12時間保持に変更 ======
 def purge_recent_12h(state, now_utc: datetime):
     cutoff = now_utc - timedelta(hours=12)
     buf = []
@@ -84,7 +87,7 @@ def purge_recent_12h(state, now_utc: datetime):
         if ts >= cutoff:
             buf.append(item)
     state["recent_urls_24h"] = buf
-# =========================================
+# ==============================
 
 # ===== 正規化＆除外集合 =====
 def normalize_url(u: str) -> str:
@@ -138,13 +141,14 @@ def compose_fixed5_text(gofile_urls, start_seq: int, salt_idx: int = 0, add_sig:
 
 # ===== X API =====
 def get_client():
+    wait_flag = os.getenv("WAIT_ON_RATE_LIMIT", "0") == "1"
     client = tweepy.Client(
         bearer_token=None,
         consumer_key=os.environ["X_API_KEY"],
         consumer_secret=os.environ["X_API_SECRET"],
         access_token=os.environ["X_ACCESS_TOKEN"],
         access_token_secret=os.environ["X_ACCESS_TOKEN_SECRET"],
-        wait_on_rate_limit=True,
+        wait_on_rate_limit=wait_flag,  # 既定は待たない（=長時間スリープ回避）
     )
     return client
 
@@ -214,7 +218,7 @@ def main():
     now_jst = now_utc.astimezone(JST)
 
     state = load_state()
-    purge_recent_12h(state, now_utc)  # ★ ここを変更
+    purge_recent_12h(state, now_utc)
     reset_if_new_day(state, now_jst)
 
     if not within_posting_window(now_jst):
@@ -229,14 +233,25 @@ def main():
     client = get_client()
     timeline_seen = set()
     username = None
-    try:
-        timeline_seen, username = fetch_recent_urls_via_api(client, max_tweets=100)
-        print(f"[info] recent timeline gofiles via API: {len(timeline_seen)} (user={username})")
-    except tweepy.Unauthorized:
-        username = os.getenv("X_SCREEN_NAME", username)
+
+    # === ここが重要：タイムライン取得手段の切替（デフォルトはWeb）
+    use_api_tl = os.getenv("USE_API_TIMELINE", "0") == "1"
+    if use_api_tl:
+        try:
+            timeline_seen, username = fetch_recent_urls_via_api(client, max_tweets=100)
+            print(f"[info] recent timeline gofiles via API: {len(timeline_seen)} (user={username})")
+        except tweepy.TweepyException as e:
+            # APIが使えない場合は即Webにフォールバック
+            username = os.getenv("X_SCREEN_NAME", username)
+            web_seen = fetch_recent_urls_via_web(username=username, scrolls=3, wait_ms=1000) if username else set()
+            timeline_seen = web_seen
+            print(f"[warn] API failed ({e}); fallback to WEB: {len(timeline_seen)} (user={username})")
+    else:
+        username = os.getenv("X_SCREEN_NAME")
         web_seen = fetch_recent_urls_via_web(username=username, scrolls=3, wait_ms=1000) if username else set()
         timeline_seen = web_seen
-        print(f"[info] recent timeline gofiles via WEB: {len(timeline_seen)} (user={username})")
+        print(f"[info] recent timeline gofiles via WEB (forced): {len(timeline_seen)} (user={username})")
+
     if timeline_seen:
         already_seen |= timeline_seen
 
