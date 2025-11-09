@@ -38,31 +38,28 @@ jobs:
           pip install -r requirements.txt
           python -m playwright install --with-deps chromium
 
-      # === 1) gofilelab ===
+      # === 1) gofilelab（軽く当ててダメなら即次へ） ===
       - name: Run bot (gofilelab)
         id: gofilelab
-        timeout-minutes: 12
+        timeout-minutes: 8
         env:
           BASE_ORIGIN: "https://gofilelab.com"
-          BASE_LIST_URL: "https://gofilelab.com/newest/page/{page}/"  # gofilelabのリスト形式
+          BASE_LIST_URL: "https://gofilelab.com/newest/page/{page}/"
           PAGE1_URL: "https://gofilelab.com/newest/"
-
           # 収集・フィルタ
-          SCRAPE_TIMEOUT_SEC: 600
-          RAW_LIMIT: 40
+          SCRAPE_TIMEOUT_SEC: 120
+          RAW_LIMIT: 20
           FILTER_LIMIT: 18
-          NUM_PAGES: 20   # gofilelabは20ページまで
-
+          NUM_PAGES: 12
           # X/Twitter
-          USE_API_TIMELINE: "0"     # ← TLの重複チェックはWeb固定
-          WAIT_ON_RATE_LIMIT: "0"   # ← API待機しない（長時間スリープ回避）
-          HARD_LIMIT_SEC: "600"     # ← bot.pyのウォッチドッグ
+          USE_API_TIMELINE: "0"     # TLチェックはWeb
+          WAIT_ON_RATE_LIMIT: "0"   # APIで待たない（長時間スリープ回避）
+          HARD_LIMIT_SEC: "240"     # bot.py側のウォッチドッグ
           X_API_KEY: ${{ secrets.X_API_KEY }}
           X_API_SECRET: ${{ secrets.X_API_SECRET }}
           X_ACCESS_TOKEN: ${{ secrets.X_ACCESS_TOKEN }}
           X_ACCESS_TOKEN_SECRET: ${{ secrets.X_ACCESS_TOKEN_SECRET }}
           X_SCREEN_NAME: ${{ vars.X_SCREEN_NAME }}
-
           # プロキシ（任意）
           HTTP_PROXY: ${{ secrets.HTTP_PROXY }}
           HTTPS_PROXY: ${{ secrets.HTTPS_PROXY }}
@@ -75,24 +72,22 @@ jobs:
             echo "posted=false" >> "$GITHUB_OUTPUT"
           fi
 
-      # === 2) nsnn.net ===（前サイトでツイート成功ならスキップ）
+      # === 2) nsnn.net（主戦場：40ページ） ===
       - name: Run bot (nsnn.net)
         id: nsnn
         if: steps.gofilelab.outputs.posted != 'true'
-        timeout-minutes: 12
+        timeout-minutes: 10
         env:
           BASE_ORIGIN: "https://nsnn.net"
           BASE_LIST_URL: "https://nsnn.net/gofile.io?page={page}&sort=newtest"
           PAGE1_URL: "https://nsnn.net/gofile.io?page=1&sort=newtest"
-
-          SCRAPE_TIMEOUT_SEC: 600
+          SCRAPE_TIMEOUT_SEC: 300
           RAW_LIMIT: 40
           FILTER_LIMIT: 18
-          NUM_PAGES: 40   # ★ nsnnだけ40ページまで巡回
-
+          NUM_PAGES: 40  # nsnnだけ40ページ巡回
           USE_API_TIMELINE: "0"
           WAIT_ON_RATE_LIMIT: "0"
-          HARD_LIMIT_SEC: "600"
+          HARD_LIMIT_SEC: "240"
           X_API_KEY: ${{ secrets.X_API_KEY }}
           X_API_SECRET: ${{ secrets.X_API_SECRET }}
           X_ACCESS_TOKEN: ${{ secrets.X_ACCESS_TOKEN }}
@@ -109,24 +104,22 @@ jobs:
             echo "posted=false" >> "$GITHUB_OUTPUT"
           fi
 
-      # === 3) orevideo ===（前2サイトのいずれかでツイート成功ならスキップ）
+      # === 3) orevideo（補完：20ページ） ===
       - name: Run bot (orevideo)
         id: orevideo
         if: steps.gofilelab.outputs.posted != 'true' && steps.nsnn.outputs.posted != 'true'
-        timeout-minutes: 12
+        timeout-minutes: 8
         env:
           BASE_ORIGIN: "https://orevideo.pythonanywhere.com"
-          BASE_LIST_URL: "https://orevideo.pythonanywhere.com/?page={page}&sort=newest"  # 実URL順序
+          BASE_LIST_URL: "https://orevideo.pythonanywhere.com/?page={page}&sort=newest"
           PAGE1_URL: "https://orevideo.pythonanywhere.com/?page=1&sort=newest"
-
-          SCRAPE_TIMEOUT_SEC: 600
-          RAW_LIMIT: 40
+          SCRAPE_TIMEOUT_SEC: 180
+          RAW_LIMIT: 20
           FILTER_LIMIT: 18
-          NUM_PAGES: 20   # orevideoは20ページまで
-
+          NUM_PAGES: 20
           USE_API_TIMELINE: "0"
           WAIT_ON_RATE_LIMIT: "0"
-          HARD_LIMIT_SEC: "600"
+          HARD_LIMIT_SEC: "240"
           X_API_KEY: ${{ secrets.X_API_KEY }}
           X_API_SECRET: ${{ secrets.X_API_SECRET }}
           X_ACCESS_TOKEN: ${{ secrets.X_ACCESS_TOKEN }}
@@ -143,7 +136,7 @@ jobs:
             echo "posted=false" >> "$GITHUB_OUTPUT"
           fi
 
-      # === Commit state ===（常に1回だけ）
+      # === Commit state ===
       - name: Commit state
         if: always()
         env:
