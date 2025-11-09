@@ -1,12 +1,8 @@
-# bot.py — タイムライン投稿版（コミュニティ投稿を廃止）
-# ・毎時実行（workflowのcronまま）
-# ・1日16投稿まで
-# ・本文は Gofile 5件 + Amazonリンク4件を交互（番号はstateで蓄積カウント）
-# ・成功したURLだけ state.json に保存（重複回避は従来どおり）
-# ・収集/死活判定ロジックは goxplorer.py 側に依存（変更なし）
-# ・タイムラインの重複チェックはデフォルトで「Webスクレイプ」
-#   - USE_API_TIMELINE=1 を設定するとAPIで取得（レートに注意）
-# ・APIの待機挙動は WAIT_ON_RATE_LIMIT=1 で有効（デフォルト無効=0）
+# bot.py — 即投稿モード（5件そろい次第ツイート＆終了）
+# ・各サイトごとに起動。5件集まれば即投稿 → 終了
+# ・1日16投稿まで（state.json管理）
+# ・本文は Gofile 5件 + Amazonリンク4件を交互
+# ・収集/死活判定ロジックは goxplorer.py 側に依存
 
 import json
 import os
@@ -20,9 +16,9 @@ from playwright.sync_api import sync_playwright
 from goxplorer import collect_fresh_gofile_urls, is_gofile_alive
 
 # ===== 設定 =====
-AFFILIATE_URL = "https://amzn.to/3Kq0QGm"   # ★ 指定のアソシエイトリンク
+AFFILIATE_URL = "https://amzn.to/3Kq0QGm"
 STATE_FILE = "state.json"
-DAILY_LIMIT = 16                # 1日16投稿
+DAILY_LIMIT = 16
 JST = tz.gettz("Asia/Tokyo")
 TWEET_LIMIT = 280
 TCO_URL_LEN = 23
@@ -33,8 +29,14 @@ ZWSP = "\u200B"
 ZWNJ = "\u200C"
 INVISIBLES = [ZWSP, ZWNJ]
 
+def _env_bool(name: str, default: bool) -> bool:
+    v = os.getenv(name)
+    if v is None:
+        return default
+    return str(v).strip().lower() in ("1", "true", "yes", "on")
+
 # 実行時間の上限（ウォッチドッグ）
-HARD_LIMIT_SEC = int(os.getenv("HARD_LIMIT_SEC", "600"))  # 既定10分
+HARD_LIMIT_SEC = int(os.getenv("HARD_LIMIT_SEC", "240"))  # デフォルト4分
 
 # ===== state =====
 def _default_state():
@@ -43,7 +45,7 @@ def _default_state():
         "last_post_date": None,
         "posts_today": 0,
         "recent_urls_24h": [],
-        "line_seq": 1,   # ★ 番号の起点（蓄積カウント）。必要なら手動でstate.jsonを書き換え可
+        "line_seq": 1,
     }
 
 def load_state():
@@ -75,7 +77,7 @@ def within_posting_window(now_jst):
 def can_post_more_today(state):
     return state.get("posts_today", 0) < DAILY_LIMIT
 
-# ====== 12時間保持に変更 ======
+# ====== 12時間保持 ======
 def purge_recent_12h(state, now_utc: datetime):
     cutoff = now_utc - timedelta(hours=12)
     buf = []
@@ -87,7 +89,6 @@ def purge_recent_12h(state, now_utc: datetime):
         if ts >= cutoff:
             buf.append(item)
     state["recent_urls_24h"] = buf
-# ==============================
 
 # ===== 正規化＆除外集合 =====
 def normalize_url(u: str) -> str:
@@ -141,14 +142,14 @@ def compose_fixed5_text(gofile_urls, start_seq: int, salt_idx: int = 0, add_sig:
 
 # ===== X API =====
 def get_client():
-    wait_flag = os.getenv("WAIT_ON_RATE_LIMIT", "0") == "1"
+    wait_flag = _env_bool("WAIT_ON_RATE_LIMIT", False)
     client = tweepy.Client(
         bearer_token=None,
         consumer_key=os.environ["X_API_KEY"],
         consumer_secret=os.environ["X_API_SECRET"],
         access_token=os.environ["X_ACCESS_TOKEN"],
         access_token_secret=os.environ["X_ACCESS_TOKEN_SECRET"],
-        wait_on_rate_limit=wait_flag,  # 既定は待たない（=長時間スリープ回避）
+        wait_on_rate_limit=wait_flag,
     )
     return client
 
@@ -230,24 +231,21 @@ def main():
 
     already_seen = build_seen_set_from_state(state)
 
-    client = get_client()
+    # --- タイムライン重複チェック：API or WEB 強制 ---
+    use_api_tl = _env_bool("USE_API_TIMELINE", False)
+    username = os.getenv("X_SCREEN_NAME") or None
     timeline_seen = set()
-    username = None
-
-    # === ここが重要：タイムライン取得手段の切替（デフォルトはWeb）
-    use_api_tl = os.getenv("USE_API_TIMELINE", "0") == "1"
     if use_api_tl:
         try:
-            timeline_seen, username = fetch_recent_urls_via_api(client, max_tweets=100)
-            print(f"[info] recent timeline gofiles via API: {len(timeline_seen)} (user={username})")
-        except tweepy.TweepyException as e:
-            # APIが使えない場合は即Webにフォールバック
-            username = os.getenv("X_SCREEN_NAME", username)
+            client = get_client()
+            timeline_seen, api_user = fetch_recent_urls_via_api(client, max_tweets=100)
+            print(f"[info] recent timeline gofiles via API: {len(timeline_seen)} (user={api_user})")
+        except Exception as e:
+            print(f"[warn] API timeline failed ({e}); fallback to WEB")
             web_seen = fetch_recent_urls_via_web(username=username, scrolls=3, wait_ms=1000) if username else set()
             timeline_seen = web_seen
-            print(f"[warn] API failed ({e}); fallback to WEB: {len(timeline_seen)} (user={username})")
+            print(f"[info] recent timeline gofiles via WEB (fallback): {len(timeline_seen)} (user={username})")
     else:
-        username = os.getenv("X_SCREEN_NAME")
         web_seen = fetch_recent_urls_via_web(username=username, scrolls=3, wait_ms=1000) if username else set()
         timeline_seen = web_seen
         print(f"[info] recent timeline gofiles via WEB (forced): {len(timeline_seen)} (user={username})")
@@ -255,10 +253,7 @@ def main():
     if timeline_seen:
         already_seen |= timeline_seen
 
-    if time.monotonic() - start_ts > HARD_LIMIT_SEC:
-        print("[warn] time budget exceeded before collection; abort.")
-        return
-
+    # --- 収集：want=5 で揃い次第 return（goxplorer側が早期終了）---
     try:
         deadline_env = os.getenv("SCRAPE_TIMEOUT_SEC")
         deadline_sec = int(deadline_env) if deadline_env else None
@@ -267,15 +262,17 @@ def main():
 
     candidates = collect_fresh_gofile_urls(
         already_seen=already_seen,
-        want=25,
+        want=5,  # ★ 即投稿モード
         num_pages=int(os.getenv("NUM_PAGES", "100")),
         deadline_sec=deadline_sec
     )
     print(f"[info] collected candidates: {len(candidates)}")
     if len(candidates) < 5:
         print("Not enough fresh URLs found; skip.")
+        save_state(state)
         return
 
+    # --- 最終プレフライト（ごく軽い再チェック）---
     target = 5
     tested = set()
     preflight = []
@@ -287,7 +284,7 @@ def main():
         if n in tested or n in already_seen or n in preflight:
             return False
         tested.add(n)
-        if is_alive_retry(n, retries=1, delay_sec=0.5):
+        if is_alive_retry(n, retries=1, delay_sec=0.3):
             preflight.append(n)
             return True
         return False
@@ -297,24 +294,13 @@ def main():
             break
         add_if_alive(u)
 
-    if len(preflight) < target and (time.monotonic() - start_ts) <= HARD_LIMIT_SEC:
-        extra = collect_fresh_gofile_urls(
-            already_seen=already_seen | set(preflight) | tested,
-            want=40,
-            num_pages=int(os.getenv("NUM_PAGES", "100")),
-            deadline_sec=deadline_sec
-        )
-        print(f"[info] extra collected for preflight: {len(extra)}")
-        for u in extra:
-            if len(preflight) >= target or (time.monotonic() - start_ts) > HARD_LIMIT_SEC:
-                break
-            add_if_alive(u)
-
     if len(preflight) < target:
         print("Final preflight could not assemble 5 URLs; skip.")
         save_state(state)
         return
 
+    # --- 投稿 ---
+    client = get_client()
     start_seq = int(state.get("line_seq", 1))
     salt = (now_jst.hour + now_jst.minute) % len(INVISIBLES)
     status_text, taken = compose_fixed5_text(preflight, start_seq=start_seq, salt_idx=salt, add_sig=True)
