@@ -1,18 +1,14 @@
-# goxplorer.py — multi-site対応版（年齢ゲート強化・早期打ち切り・超軽量死活判定）
-# 目的:
-# - まず RAW_LIMIT 件だけ素早く収集（環境変数で調整可能、デフォルト100）
-# - 先頭 FILTER_LIMIT 件だけ超軽量フィルタ → 既出除外＆死活OKから want 本揃った時点で即返す
-# - 死活判定は 1 回だけ ≤0.5s GET、先頭 1.5KB に死亡確定文言があれば False。
-#   タイムアウト/403/503 などは “死と断定不可” → True（=投稿候補OK）
+# goxplorer.py — multi-site対応（年齢ゲート強化 + リダイレクト直解決 + 早期打ち切り）
 #
-# 環境変数（任意）:
-#   BASE_ORIGIN          対象サイトの origin（例: https://gofilelab.com）
-#   BASE_LIST_URL        一覧URLのフォーマット（例: https://gofilelab.com/newest/page/{page}/）
-#   SCRAPE_TIMEOUT_SEC   フィルタ処理の締め切り秒（botから未指定時に参照）
-#   RAW_LIMIT=100        荒取りの最大件数
-#   FILTER_LIMIT=50      死活判定に回す最大件数
+# 変更要点:
+# - /redirect?url=... を「ページを開かずに」gofile直解決して収集（nsnn向けに劇的高速化）
+# - 年齢ゲート/オーバーレイ除去の evaluate を全面try/catch化（null参照で落ちない）
+# - gofilelabでもゼロ件になりにくいようリスト抽出セレクタを拡張
+# - 既出除外→死活OKから want 到達で即返す（従来踏襲）
 #
-# 依存は requirements.txt のまま。
+# 環境変数:
+#   BASE_ORIGIN, BASE_LIST_URL（サイト切替）
+#   RAW_LIMIT, FILTER_LIMIT, SCRAPE_TIMEOUT_SEC など従来どおり
 
 import os
 import re
@@ -26,15 +22,10 @@ import requests
 from bs4 import BeautifulSoup
 from playwright.sync_api import sync_playwright
 
-# ====== サイト設定（環境変数で置換可能） ======
+# ===== サイト設定 =====
 _DEFAULT_ORIGIN = "https://gofilelab.com"
 BASE_ORIGIN = os.getenv("BASE_ORIGIN", _DEFAULT_ORIGIN).rstrip("/")
-# 代表的な既定値（gofilelab）
 _DEFAULT_LIST_URL = f"{BASE_ORIGIN}/newest?page={{page}}"
-# 例:
-#   gofilelab: https://gofilelab.com/newest/page/{page}/    （テーマにより/page/形式）
-#   nsnn.net : https://nsnn.net/gofile.io?page={page}&sort=newtest
-#   orevideo:  https://orevideo.pythonanywhere.com/?page={page}&sort=newest
 BASE_LIST_URL = os.getenv("BASE_LIST_URL", _DEFAULT_LIST_URL)
 
 WP_POSTS_API  = f"{BASE_ORIGIN}/wp-json/wp/v2/posts?page={{page}}&per_page=20&_fields=link,content.rendered"
@@ -43,20 +34,16 @@ SITEMAP_INDEX = f"{BASE_ORIGIN}/sitemap_index.xml"
 GOFILE_RE = re.compile(r"https?://gofile\.io/d/[A-Za-z0-9]+", re.I)
 _LOC_RE   = re.compile(r"<loc>(.*?)</loc>", re.IGNORECASE | re.DOTALL)
 
-# ====== HTTPヘッダ ======
 HEADERS = {
-    "User-Agent": (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/123.0.0.0 Safari/537.36"
-    ),
+    "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                   "AppleWebKit/537.36 (KHTML, like Gecko) "
+                   "Chrome/123.0.0.0 Safari/537.36"),
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
     "Accept-Language": "ja-JP,ja;q=0.9,en-US;q=0.8,en;q=0.7",
     "Referer": BASE_ORIGIN,
     "Connection": "keep-alive",
 }
 
-# ====== 上限パラメータ ======
 RAW_LIMIT    = int(os.getenv("RAW_LIMIT", "100"))
 FILTER_LIMIT = int(os.getenv("FILTER_LIMIT", "50"))
 
@@ -70,8 +57,6 @@ def _build_scraper():
     s = cloudscraper.create_scraper(browser={"browser": "chrome", "platform": "windows", "mobile": False})
     if proxies: s.proxies.update(proxies)
     s.headers.update(HEADERS)
-
-    # 年齢ゲート用cookie（gofilelab向け）。他サイトでも害はない。
     try:
         host = urlparse(BASE_ORIGIN).hostname or "gofilelab.com"
         s.cookies.set("ageVerified", "1", domain=host, path="/")
@@ -87,7 +72,7 @@ def _now() -> float: return time.monotonic()
 def _deadline_passed(deadline_ts: Optional[float]) -> bool:
     return deadline_ts is not None and _now() >= deadline_ts
 
-# ====== 死活判定（超軽量） ======
+# ===== 死活判定（超軽量） =====
 _DEATH_MARKERS = (
     "This content does not exist",
     "The content you are looking for could not be found",
@@ -96,10 +81,6 @@ _DEATH_MARKERS = (
 )
 
 def is_gofile_alive(url: str) -> bool:
-    """
-    1回だけ超短時間 GET (timeout=0.5s)。先頭 1.5KB で死亡確定文言があれば False。
-    それ以外（タイムアウトやエラー）は True（=死と断定不可）。
-    """
     url = fix_scheme(url)
     s = _build_scraper()
     try:
@@ -117,14 +98,15 @@ def is_gofile_alive(url: str) -> bool:
     except Exception:
         return True
 
-# ====== 抽出ユーティリティ ======
+# ===== gofile抽出 =====
 def _resolve_to_gofile(url: str, scraper, timeout: int = 4) -> Optional[str]:
     if not url: return None
     url = fix_scheme(url)
     try:
         pr = urlparse(url)
-        # gofilelab内の ?url= や target= に gofile が埋まるパターン
-        if pr.netloc and pr.netloc.endswith(urlparse(BASE_ORIGIN).hostname or ""):
+        host = urlparse(BASE_ORIGIN).hostname or ""
+        # 同一サイト内の redirect?url=... を直解決
+        if pr.netloc and (host and pr.netloc.endswith(host)):
             qs = parse_qs(pr.query or "")
             for k in ("url", "u", "target"):
                 if k in qs and qs[k]:
@@ -148,12 +130,12 @@ def _extract_gofile_from_html(html: str, scraper) -> List[str]:
     soup = BeautifulSoup(html or "", "html.parser")
     urls, seen = [], set()
 
-    # a要素から href / data-* を拾う
+    # a要素の href / data-* をチェック
     for a in soup.find_all("a"):
         href = (a.get("href") or "").strip()
         if href:
             m = GOFILE_RE.search(href)
-            go = fix_scheme(m.group(0)) if m else _resolve_to_gofile(href, scraper)
+            go = fix_scheme(m.group(0)) if m else _resolve_to_gofile(urljoin(BASE_ORIGIN, href), scraper)
             if go and go not in seen:
                 seen.add(go); urls.append(go)
 
@@ -166,14 +148,14 @@ def _extract_gofile_from_html(html: str, scraper) -> List[str]:
                 if go2 and go2 not in seen:
                     seen.add(go2); urls.append(go2)
 
-    # 生テキスト中の gofile も最後に総なめ
+    # プレーンテキスト
     for m in GOFILE_RE.findall(html or ""):
         u = fix_scheme(m.strip())
         if u and u not in seen:
             seen.add(u); urls.append(u)
     return urls
 
-# ====== sitemap/wp-api（速攻で空ならスキップ） ======
+# ===== sitemap / WP-API（取れれば即） =====
 def _extract_locs_from_xml(xml_text: str) -> List[str]:
     if not xml_text: return []
     raw = _LOC_RE.findall(xml_text)
@@ -225,7 +207,7 @@ def _collect_via_sitemap(num_pages: int, deadline_ts: Optional[float]) -> List[s
         for u in _extract_gofile_from_html(html, s):
             if u not in seen:
                 seen.add(u); all_urls.append(u)
-        if len(all_urls) >= RAW_LIMIT:  # ★ 早期打ち切り
+        if len(all_urls) >= RAW_LIMIT:
             return all_urls[:RAW_LIMIT]
         time.sleep(0.08)
     return all_urls[:RAW_LIMIT]
@@ -248,12 +230,12 @@ def _collect_via_wp_api(num_pages: int, deadline_ts: Optional[float]) -> List[st
             for u in _extract_gofile_from_html(html, s):
                 if u not in seen:
                     seen.add(u); all_urls.append(u)
-        if len(all_urls) >= RAW_LIMIT:  # ★ 早期打ち切り
+        if len(all_urls) >= RAW_LIMIT:
             return all_urls[:RAW_LIMIT]
         time.sleep(0.12)
     return all_urls[:RAW_LIMIT]
 
-# ====== Playwright（年齢ゲート強化＋直抽出フォールバック＋早期打ち切り） ======
+# ===== Playwright（年齢ゲート強化 + リスト直解決 + 早期打ち切り） =====
 def _playwright_ctx(pw):
     browser = pw.chromium.launch(headless=True, args=[
         "--no-sandbox",
@@ -278,19 +260,23 @@ def _playwright_ctx(pw):
     return ctx
 
 def _bypass_age_gate(page):
-    js = """
-    try {
-      localStorage.setItem('ageVerified','1');
-      localStorage.setItem('adult','true');
-      localStorage.setItem('age_verified','true');
-      localStorage.setItem('age_verified_at', Date.now().toString());
-      document.cookie = "ageVerified=1; path=/; max-age=31536000";
-      document.cookie = "adult=true; path=/; max-age=31536000";
-    } catch(e){}
-    """
-    page.evaluate(js); page.wait_for_timeout(150)
+    # すべて try/catch で安全化
+    try:
+        page.evaluate("""
+          try {
+            localStorage.setItem('ageVerified','1');
+            localStorage.setItem('adult','true');
+            localStorage.setItem('age_verified','true');
+            localStorage.setItem('age_verified_at', Date.now().toString());
+            document.cookie = "ageVerified=1; path=/; max-age=31536000";
+            document.cookie = "adult=true; path=/; max-age=31536000";
+          } catch(e){}
+        """)
+    except Exception:
+        pass
+    page.wait_for_timeout(120)
 
-    # チェックボックスがあれば強制チェック
+    # チェックボックス強制ON
     for sel in [
         "input[type='checkbox']",
         "form input[type='checkbox']",
@@ -305,11 +291,12 @@ def _bypass_age_gate(page):
                     el.check(force=True)
                 except Exception:
                     el.click(force=True)
-                page.wait_for_timeout(120); break
+                page.wait_for_timeout(100)
+                break
         except Exception:
             pass
 
-    # 同意/入場ボタンの揺れを広く吸収
+    # 同意/入場ボタン
     for sel in [
         "button:has-text('同意')","button:has-text('入場')",
         "button:has-text('I Agree')","button:has-text('Enter')",
@@ -320,18 +307,25 @@ def _bypass_age_gate(page):
         try:
             btn = page.query_selector(sel)
             if btn and (bb := btn.bounding_box()) and bb.get("width",0)>0 and bb.get("height",0)>0:
-                btn.click(force=True); page.wait_for_timeout(180); break
+                btn.click(force=True)
+                page.wait_for_timeout(150)
+                break
         except Exception:
             pass
 
-    # オーバーレイが残ってたら除去（安全側）
-    page.evaluate("""
-      for (const sel of ['.modal','[class*="age"]','[id*="age"]','.overlay','.backdrop']) {
-        document.querySelectorAll(sel).forEach(n => { try { n.remove(); } catch(e){} });
-      }
-      document.body.style.overflow = 'auto';
-    """)
-    page.wait_for_timeout(120)
+    # 残留オーバーレイ安全除去
+    try:
+        page.evaluate("""
+          try {
+            for (const sel of ['.modal','[class*="age"]','[id*="age"]','.overlay','.backdrop']) {
+              document.querySelectorAll(sel).forEach(n => { try { n.remove(); } catch(e){} });
+            }
+            if (document.body) document.body.style.overflow = 'auto';
+          } catch(e){}
+        """)
+    except Exception:
+        pass
+    page.wait_for_timeout(80)
 
 def _get_html_pw(url: str, scroll_steps: int = 6, wait_ms: int = 600) -> str:
     with sync_playwright() as pw:
@@ -344,18 +338,20 @@ def _get_html_pw(url: str, scroll_steps: int = 6, wait_ms: int = 600) -> str:
             "Connection": HEADERS["Connection"],
         })
 
-        # 先にトップでゲート通過 → 目的URLへ（2段階で確実化）
-        page.goto(BASE_ORIGIN, wait_until="domcontentloaded", timeout=20000)
+        try:
+            page.goto(BASE_ORIGIN, wait_until="domcontentloaded", timeout=20000)
+        except Exception:
+            pass
         _bypass_age_gate(page)
         try:
-            page.wait_for_load_state("networkidle", timeout=12000)
+            page.wait_for_load_state("networkidle", timeout=10000)
         except Exception:
             pass
 
         page.goto(url, wait_until="domcontentloaded", timeout=22000)
         _bypass_age_gate(page)
         try:
-            page.wait_for_load_state("networkidle", timeout=12000)
+            page.wait_for_load_state("networkidle", timeout=10000)
         except Exception:
             pass
 
@@ -370,8 +366,14 @@ def _extract_article_links_from_list(html: str) -> List[str]:
     soup = BeautifulSoup(html or "", "html.parser")
     links, seen = [], set()
 
-    # 代表セレクタ（テーマ差を吸収するため複数）
-    for sel in ["article a", ".entry-title a", "a[rel='bookmark']", ".post-card a"]:
+    # 広めのセレクタ群（テーマ差を吸収）
+    selectors = [
+        "article a", ".entry-title a", "a[rel='bookmark']",
+        "h2 a", ".post a", ".post-card a",
+        "a[href*='/redirect?url=']",  # nsnn の直リダイレクト
+        "a[href*='gofile.io/d/']"     # 直接 gofile が露出している場合
+    ]
+    for sel in selectors:
         for a in soup.select(sel):
             href = a.get("href")
             if not href: continue
@@ -379,21 +381,22 @@ def _extract_article_links_from_list(html: str) -> List[str]:
             if url not in seen:
                 seen.add(url); links.append(url)
 
-    # セーフティ: 内部リンクでノイズ除外
+    # セーフティ: 内部リンクでノイズ除外（少数だった場合）
     if len(links) < 12:
+        host = urlparse(BASE_ORIGIN).hostname or ""
         for a in soup.find_all("a", href=True):
             href = a["href"].strip()
             if not href or href.startswith("#"): continue
             url = urljoin(BASE_ORIGIN, href)
             pr = urlparse(url)
-            if pr.netloc and not pr.netloc.endswith(urlparse(BASE_ORIGIN).hostname or ""): continue
+            if pr.netloc and (host and not pr.netloc.endswith(host)): continue
             bad = ("/newest","/category/","/tag/","/page/","/search","/author","/feed","/privacy","/contact")
             if any(x in pr.path for x in bad): continue
             if pr.path.endswith((".jpg",".png",".gif",".webp",".svg",".css",".js",".zip",".rar",".pdf",".xml")): continue
             if url not in seen:
                 seen.add(url); links.append(url)
 
-    return links[:50]
+    return links[:80]  # 1ページで多すぎると重いので上限
 
 def _collect_via_playwright(num_pages: int, deadline_ts: Optional[float]) -> List[str]:
     s = _build_scraper()
@@ -405,51 +408,61 @@ def _collect_via_playwright(num_pages: int, deadline_ts: Optional[float]) -> Lis
 
         list_url = BASE_LIST_URL.format(page=p)
         try:
-            lhtml = _get_html_pw(list_url, scroll_steps=6, wait_ms=600)
+            lhtml = _get_html_pw(list_url, scroll_steps=4, wait_ms=450)
         except Exception as e:
-            print(f"[warn] playwright list {p} failed: {e}"); lhtml = ""
+            print(f"[warn] playwright list {p} failed: {e}")
+            lhtml = ""
 
         article_urls = _extract_article_links_from_list(lhtml) if lhtml else []
         print(f"[info] page {p}: found {len(article_urls)} article links")
 
-        # 詳細に入る（1ページでそこそこ拾えるので、早期に RAW_LIMIT 到達させる）
         added = 0
         for post_url in article_urls:
             if _deadline_passed(deadline_ts): break
             if post_url in seen_posts: continue
             seen_posts.add(post_url)
+
+            # ★ まずは「リダイレクト直解決」→ gofile 抽出（詳細ページへは行かない）
+            go = _resolve_to_gofile(post_url, s, timeout=2)
+            if go:
+                if go not in seen_urls:
+                    seen_urls.add(go); all_urls.append(go); added += 1
+                    if len(all_urls) >= RAW_LIMIT:
+                        print(f"[info] early stop: reached RAW_LIMIT={RAW_LIMIT} (total {len(all_urls)})")
+                        return all_urls[:RAW_LIMIT]
+                continue
+
+            # ★ 直解決できなかった場合のみ、詳細に入りHTMLから抽出
             try:
-                dhtml = _get_html_pw(post_url, scroll_steps=3, wait_ms=520)
+                dhtml = _get_html_pw(post_url, scroll_steps=2, wait_ms=420)
             except Exception as e:
-                print(f"[warn] playwright detail failed: {post_url} ({e})"); dhtml = ""
+                print(f"[warn] playwright detail failed: {post_url} ({e})")
+                dhtml = ""
             urls = _extract_gofile_from_html(dhtml, s) if dhtml else []
             for u in urls:
                 if u not in seen_urls:
                     seen_urls.add(u); all_urls.append(u); added += 1
-                    if len(all_urls) >= RAW_LIMIT:  # ★ 早期打ち切り
+                    if len(all_urls) >= RAW_LIMIT:
                         print(f"[info] early stop: reached RAW_LIMIT={RAW_LIMIT} (total {len(all_urls)})")
                         return all_urls[:RAW_LIMIT]
-            time.sleep(0.12)
+            time.sleep(0.08)
 
         print(f"[info] page {p}: extracted {added} new urls (total {len(all_urls)})")
-        time.sleep(0.2)
+        time.sleep(0.15)
 
     return all_urls[:RAW_LIMIT]
 
-# ====== エントリーポイント ======
+# ===== エントリーポイント =====
 def fetch_listing_pages(num_pages: int = 100, deadline_ts: Optional[float] = None) -> List[str]:
-    # まずは sitemap / wp-api（取れれば速い）
     urls = _collect_via_sitemap(num_pages=num_pages, deadline_ts=deadline_ts)
     if urls: return urls[:RAW_LIMIT]
     urls = _collect_via_wp_api(num_pages=num_pages, deadline_ts=deadline_ts)
     if urls: return urls[:RAW_LIMIT]
-    # 最後に Playwright
     return _collect_via_playwright(num_pages=num_pages, deadline_ts=deadline_ts)
 
 def collect_fresh_gofile_urls(
     already_seen: Set[str], want: int = 3, num_pages: int = 100, deadline_sec: Optional[int] = None
 ) -> List[str]:
-    # bot側未指定なら環境変数 SCRAPE_TIMEOUT_SEC を自動採用
     if deadline_sec is None:
         _env = os.getenv("SCRAPE_TIMEOUT_SEC")
         try:
@@ -461,7 +474,6 @@ def collect_fresh_gofile_urls(
     deadline_ts = (_now() + deadline_sec) if deadline_sec else None
     raw = fetch_listing_pages(num_pages=num_pages, deadline_ts=deadline_ts)
 
-    # 先頭 FILTER_LIMIT 件だけ超軽量判定。want 到達で即返す。
     candidates = [u for u in raw if u not in already_seen][:max(1, FILTER_LIMIT)]
     uniq, seen_now = [], set()
 
@@ -474,3 +486,4 @@ def collect_fresh_gofile_urls(
             if len(uniq) >= want:
                 break
     return uniq
+
