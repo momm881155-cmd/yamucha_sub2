@@ -1,5 +1,4 @@
-# goxplorer.py — lab専用: DOM直読 + フォールバック/正規表現抽出 + http→https 正規化
-# かつ、_collect_via_wp_api の欠落を補完（NameError対策）
+# goxplorer.py — lab専用: DOM直読 + 詳細ページ追撃 / 正規表現フォールバック / http→https 正規化
 import os, re, time
 from html import unescape
 from urllib.parse import urlparse, parse_qs, unquote, urljoin
@@ -19,7 +18,6 @@ BASE_ORIGIN   = ENV_BASE_ORIGIN
 BASE_LIST_URL = ENV_BASE_LIST_URL
 PAGE1_URL     = ENV_PAGE1_URL
 
-# lab 以外でも使うルート
 WP_POSTS_API  = BASE_ORIGIN + "/wp-json/wp/v2/posts?page={page}&per_page=20&_fields=link,content.rendered"
 SITEMAP_INDEX = BASE_ORIGIN + "/sitemap_index.xml"
 
@@ -200,7 +198,7 @@ def _collect_via_sitemap(num_pages: int, deadline_ts: Optional[float]) -> List[s
     return all_urls[:RAW_LIMIT]
 
 def _collect_via_wp_api(num_pages: int, deadline_ts: Optional[float]) -> List[str]:
-    # ★ 抜けていた関数を復活（NameError対策）
+    # （NameError対策で必ず定義）
     s = _build_scraper()
     all_urls, seen = [], set()
     for p in range(1, num_pages + 1):
@@ -272,8 +270,6 @@ def _bypass_age_gate(page):
     except Exception:
         pass
     page.wait_for_timeout(120)
-
-    # 目視UIがあればクリック（失敗してもよい）
     for sel in [
         "input[type='checkbox']",
         "label:has-text('18') >> input[type='checkbox']",
@@ -302,9 +298,9 @@ def _bypass_age_gate(page):
     try: page.wait_for_load_state("networkidle", timeout=8000)
     except Exception: pass
 
-# ====== ★ lab専用：一覧ページから確実回収（DOM直読 + 正規表現フォールバック） ======
+# ====== ★ lab専用：一覧 + 詳細ページ追撃 ======
 def _collect_lab_fast(num_pages: int, deadline_ts: Optional[float]) -> List[str]:
-    all_urls, seen = [], set()
+    all_urls, seen_gofile, seen_posts = [], set(), set()
     with sync_playwright() as pw:
         ctx = _playwright_ctx(pw)
         page = ctx.new_page()
@@ -314,6 +310,8 @@ def _collect_lab_fast(num_pages: int, deadline_ts: Optional[float]) -> List[str]
             "Referer": BASE_ORIGIN,
             "Connection": HEADERS["Connection"],
         })
+
+        base_host = urlparse(BASE_ORIGIN).hostname or ""
 
         for p in range(1, num_pages + 1):
             if _deadline_passed(deadline_ts):
@@ -327,30 +325,31 @@ def _collect_lab_fast(num_pages: int, deadline_ts: Optional[float]) -> List[str]
                 continue
 
             _bypass_age_gate(page)
+            try: page.wait_for_selector('a[href*="gofile.io/d/"], .bg-white, h3, article', timeout=8000)
+            except Exception: pass
 
-            # 遅延ロードを十分に待つ
-            try:
-                page.wait_for_selector('a[href*="gofile.io/d/"], .bg-white', timeout=8000)
-            except Exception:
-                pass
-
-            for _ in range(10):
+            # 十分に遅延ロードさせる
+            prev_h = 0
+            for _ in range(16):
                 try: page.mouse.wheel(0, 1800)
                 except Exception: pass
-                page.wait_for_timeout(220)
+                page.wait_for_timeout(200)
+                try:
+                    h = page.evaluate("() => document.body.scrollHeight") or 0
+                    if h == prev_h: break
+                    prev_h = h
+                except Exception:
+                    pass
 
-            # 1) DOM の実要素から抽出
+            # 1) list face に gofile が直書きされていれば回収
             try:
                 hrefs = page.evaluate("""
                   () => {
                     const set = new Set();
-                    document.querySelectorAll('a[href*="gofile.io/d/"]').forEach(a => {
-                      if (a && a.href) set.add(a.href);
-                    });
-                    document.querySelectorAll('[data-url], [data-href], [data-clipboard-text]').forEach(el => {
-                      ['data-url','data-href','data-clipboard-text'].forEach(k => {
-                        const v = el.getAttribute(k);
-                        if (v) set.add(v);
+                    document.querySelectorAll('a[href*="gofile.io/d/"]').forEach(a => a.href && set.add(a.href));
+                    document.querySelectorAll('[data-url],[data-href],[data-clipboard-text]').forEach(el=>{
+                      ['data-url','data-href','data-clipboard-text'].forEach(k=>{
+                        const v = el.getAttribute(k); if(v) set.add(v);
                       });
                     });
                     return Array.from(set);
@@ -359,27 +358,82 @@ def _collect_lab_fast(num_pages: int, deadline_ts: Optional[float]) -> List[str]
             except Exception:
                 hrefs = []
 
-            # 2) フォールバック: HTML 全文から正規表現で抜く
-            try:
-                html = page.content() or ""
-            except Exception:
-                html = ""
-            if html:
-                for m in GOFILE_RE.findall(html):
-                    hrefs.append(m)
-
-            added = 0
+            added_face = 0
             for raw in hrefs:
                 m = GOFILE_RE.search(raw or "")
                 if not m: continue
                 u = fix_scheme(m.group(0))
-                if u not in seen:
-                    seen.add(u); all_urls.append(u); added += 1
+                if u not in seen_gofile:
+                    seen_gofile.add(u); all_urls.append(u); added_face += 1
                     if len(all_urls) >= RAW_LIMIT:
                         print(f"[info] early stop: reached RAW_LIMIT={RAW_LIMIT} (total {len(all_urls)})")
                         ctx.close(); return all_urls[:RAW_LIMIT]
 
-            print(f"[info] page {p}: extracted {added} urls from list face (total {len(all_urls)})")
+            # ★ 2) 直書きが少ない場合は、一覧から内部の詳細リンクを集め、詳細で gofile を抽出
+            #    （これが今回 0 件を救う本命）
+            article_links = set()
+            try:
+                anchors = page.evaluate("""
+                  () => Array.from(document.querySelectorAll('a[href]'))
+                              .map(a => a.getAttribute('href'))
+                              .filter(Boolean)
+                """) or []
+            except Exception:
+                anchors = []
+
+            for href in anchors:
+                href = href.strip()
+                if href.startswith("#"): continue
+                # 相対 → 絶対
+                url = urljoin(BASE_ORIGIN, href)
+                pr = urlparse(url)
+
+                # 内部リンクだけ
+                if base_host and pr.netloc and (base_host not in pr.netloc):
+                    continue
+                # ノイズ除外
+                bad = ("/newest", "/category/", "/tag/", "/page/", "/search", "/author", "/feed", "/privacy", "/contact")
+                if any(x in pr.path for x in bad):
+                    continue
+                if pr.path.endswith((".jpg",".png",".gif",".webp",".svg",".css",".js",".zip",".rar",".pdf",".xml")):
+                    continue
+                # ページ内の「開く」は外部 gofile なので既に拾っている
+                if "gofile.io/d/" in url:
+                    continue
+
+                article_links.add(url)
+
+            added_detail = 0
+            # 詳細へ潜って gofile を抽出
+            for post_url in list(article_links)[:60]:  # 1ページあたり潰しすぎない
+                if _deadline_passed(deadline_ts): break
+                if post_url in seen_posts: continue
+                seen_posts.add(post_url)
+
+                try:
+                    page.goto(post_url, wait_until="domcontentloaded", timeout=20000)
+                except Exception as e:
+                    print(f"[warn] playwright detail failed: {post_url} ({e})"); continue
+
+                _bypass_age_gate(page)
+                for _ in range(6):
+                    try: page.mouse.wheel(0, 1500)
+                    except Exception: pass
+                    page.wait_for_timeout(180)
+
+                try: dhtml = page.content() or ""
+                except Exception: dhtml = ""
+
+                if dhtml:
+                    for u in _extract_gofile_from_html(dhtml, _build_scraper()):
+                        if u not in seen_gofile:
+                            seen_gofile.add(u); all_urls.append(u); added_detail += 1
+                            if len(all_urls) >= RAW_LIMIT:
+                                print(f"[info] early stop: reached RAW_LIMIT={RAW_LIMIT} (total {len(all_urls)})")
+                                ctx.close(); return all_urls[:RAW_LIMIT]
+                time.sleep(0.05)
+
+            print(f"[info] page {p}: extracted {added_face} urls from list face, {added_detail} from details (total {len(all_urls)})")
 
         ctx.close()
     return all_urls[:RAW_LIMIT]
@@ -492,7 +546,7 @@ def fetch_listing_pages(num_pages: int = 100, deadline_ts: Optional[float] = Non
     # それ以外は従来（sitemap → wp-api → playwright）
     urls = _collect_via_sitemap(num_pages=num_pages, deadline_ts=deadline_ts)
     if urls: return urls[:RAW_LIMIT]
-    urls = _collect_via_wp_api(num_pages=num_pages, deadline_ts=deadline_ts)  # ← NameError対策で定義済み
+    urls = _collect_via_wp_api(num_pages=num_pages, deadline_ts=deadline_ts)  # ← 定義済み
     if urls: return urls[:RAW_LIMIT]
     return _collect_via_playwright(num_pages=num_pages, deadline_ts=deadline_ts)
 
