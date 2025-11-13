@@ -1,4 +1,5 @@
-# goxplorer.py — lab専用: DOM直読で「開く」リンクを確実回収 / http→https 正規化 / 他サイトは従来どおり
+# goxplorer.py — lab専用: DOM直読 + フォールバック/正規表現抽出 + http→https 正規化
+# かつ、_collect_via_wp_api の欠落を補完（NameError対策）
 import os, re, time
 from html import unescape
 from urllib.parse import urlparse, parse_qs, unquote, urljoin
@@ -9,6 +10,7 @@ import requests
 from bs4 import BeautifulSoup
 from playwright.sync_api import sync_playwright
 
+# ====== 環境 ======
 ENV_BASE_ORIGIN   = os.getenv("BASE_ORIGIN", "https://gofilelab.com").rstrip("/")
 ENV_BASE_LIST_URL = os.getenv("BASE_LIST_URL", ENV_BASE_ORIGIN + "/newest?page={page}")
 ENV_PAGE1_URL     = os.getenv("PAGE1_URL", ENV_BASE_ORIGIN + "/newest?page=1")
@@ -17,6 +19,7 @@ BASE_ORIGIN   = ENV_BASE_ORIGIN
 BASE_LIST_URL = ENV_BASE_LIST_URL
 PAGE1_URL     = ENV_PAGE1_URL
 
+# lab 以外でも使うルート
 WP_POSTS_API  = BASE_ORIGIN + "/wp-json/wp/v2/posts?page={page}&per_page=20&_fields=link,content.rendered"
 SITEMAP_INDEX = BASE_ORIGIN + "/sitemap_index.xml"
 
@@ -60,10 +63,8 @@ def _build_scraper():
     return s
 
 def fix_scheme(url: str) -> str:
-    if url.startswith("htps://"):
-        return "https://" + url[len("htps://"):]
-    # ★ http→https 正規化（死活OK率UP）
-    if url.startswith("http://gofile.io/"):
+    if url.startswith("htps://"): return "https://" + url[len("htps://"):]
+    if url.startswith("http://gofile.io/"):  # ★ http→https を強制
         return "https://" + url[len("http://"):]
     return url
 
@@ -71,13 +72,13 @@ def _now() -> float: return time.monotonic()
 def _deadline_passed(deadline_ts: Optional[float]) -> bool:
     return deadline_ts is not None and _now() >= deadline_ts
 
+# ====== 死活（軽量） ======
 _DEATH_MARKERS = (
     "This content does not exist",
     "The content you are looking for could not be found",
     "has been automatically removed",
     "has been deleted by the owner",
 )
-
 def is_gofile_alive(url: str) -> bool:
     url = fix_scheme(url)
     s = _build_scraper()
@@ -90,13 +91,12 @@ def is_gofile_alive(url: str) -> bool:
             data = (getattr(r, "text", "") or "")[:1536]
         tl = (data or "").lower()
         for dm in _DEATH_MARKERS:
-            if dm.lower() in tl:
-                return False
+            if dm.lower() in tl: return False
         return True
     except Exception:
-        # タイムアウト/403/503などは「死と断定不可」→ True
-        return True
+        return True  # 断定不可は通す
 
+# ====== 抽出ユーティリティ ======
 def _resolve_to_gofile(url: str, scraper, timeout: int = 4) -> Optional[str]:
     if not url: return None
     url = fix_scheme(url)
@@ -108,7 +108,7 @@ def _resolve_to_gofile(url: str, scraper, timeout: int = 4) -> Optional[str]:
                 if m: return fix_scheme(m.group(0))
     except Exception:
         pass
-    try:
+    try:  # 3xx の Location
         r = scraper.get(url, timeout=timeout, allow_redirects=False)
         loc = r.headers.get("Location") or r.headers.get("location")
         if isinstance(loc, str):
@@ -137,12 +137,14 @@ def _extract_gofile_from_html(html: str, scraper) -> List[str]:
                 go2 = fix_scheme(m2.group(0))
                 if go2 and go2 not in seen:
                     seen.add(go2); urls.append(go2)
+    # 生HTML全量からも拾う（JS生成文字列含む）
     for m in GOFILE_RE.findall(html or ""):
         u = fix_scheme(m.strip())
         if u and u not in seen:
             seen.add(u); urls.append(u)
     return urls
 
+# ====== sitemap / wp-api（一般サイト向け） ======
 def _extract_locs_from_xml(xml_text: str) -> List[str]:
     if not xml_text: return []
     raw = _LOC_RE.findall(xml_text); locs = []
@@ -179,7 +181,48 @@ def _fetch_sitemap_post_urls(scraper, max_pages: int, deadline_ts: Optional[floa
     print(f"[info] sitemap collected {len(urls)} post urls")
     return urls
 
-# ---------- Playwright 共通 ----------
+def _collect_via_sitemap(num_pages: int, deadline_ts: Optional[float]) -> List[str]:
+    s = _build_scraper()
+    posts = _fetch_sitemap_post_urls(s, max_pages=num_pages, deadline_ts=deadline_ts)
+    if not posts: return []
+    all_urls, seen = [], set()
+    for i, post_url in enumerate(posts, 1):
+        if _deadline_passed(deadline_ts): print(f"[info] sitemap deadline at post {i}; stop."); break
+        try:
+            r = s.get(post_url, timeout=8); r.raise_for_status(); html = r.text
+        except Exception as e:
+            print(f"[warn] sitemap detail fetch failed: {post_url} ({e})"); continue
+        for u in _extract_gofile_from_html(html, s):
+            if u not in seen:
+                seen.add(u); all_urls.append(u)
+        if len(all_urls) >= RAW_LIMIT: return all_urls[:RAW_LIMIT]
+        time.sleep(0.06)
+    return all_urls[:RAW_LIMIT]
+
+def _collect_via_wp_api(num_pages: int, deadline_ts: Optional[float]) -> List[str]:
+    # ★ 抜けていた関数を復活（NameError対策）
+    s = _build_scraper()
+    all_urls, seen = [], set()
+    for p in range(1, num_pages + 1):
+        if _deadline_passed(deadline_ts): print(f"[info] wp-api deadline at page {p}; stop."); break
+        api = WP_POSTS_API.format(page=p)
+        try:
+            r = s.get(api, timeout=8)
+            if "json" not in (r.headers.get("Content-Type","")): raise ValueError("non-json returned")
+            arr = r.json()
+        except Exception as e:
+            print(f"[warn] wp-api page {p} failed: {e}"); break
+        if not isinstance(arr, list) or not arr: break
+        for item in arr:
+            html = (item.get("content", {}) or {}).get("rendered", "") if isinstance(item, dict) else ""
+            for u in _extract_gofile_from_html(html, s):
+                if u not in seen:
+                    seen.add(u); all_urls.append(u)
+        if len(all_urls) >= RAW_LIMIT: return all_urls[:RAW_LIMIT]
+        time.sleep(0.08)
+    return all_urls[:RAW_LIMIT]
+
+# ====== Playwright 共通 ======
 def _playwright_ctx(pw):
     browser = pw.chromium.launch(headless=True, args=[
         "--no-sandbox",
@@ -229,7 +272,8 @@ def _bypass_age_gate(page):
     except Exception:
         pass
     page.wait_for_timeout(120)
-    # 目視UIがある場合はクリック（失敗してもOK）
+
+    # 目視UIがあればクリック（失敗してもよい）
     for sel in [
         "input[type='checkbox']",
         "label:has-text('18') >> input[type='checkbox']",
@@ -239,7 +283,8 @@ def _bypass_age_gate(page):
     ]:
         try:
             el = page.locator(sel).first
-            if el and el.is_visible(): el.click(force=True, timeout=800); page.wait_for_timeout(80); break
+            if el and el.is_visible():
+                el.click(force=True, timeout=800); page.wait_for_timeout(80); break
         except Exception:
             pass
     for sel in [
@@ -250,13 +295,14 @@ def _bypass_age_gate(page):
     ]:
         try:
             btn = page.locator(sel).first
-            if btn and btn.is_visible(): btn.click(force=True, timeout=1200); page.wait_for_timeout(150); break
+            if btn and btn.is_visible():
+                btn.click(force=True, timeout=1200); page.wait_for_timeout(150); break
         except Exception:
             pass
     try: page.wait_for_load_state("networkidle", timeout=8000)
     except Exception: pass
 
-# ---------- ★ lab専用: DOM直読みで一覧から直収集 ----------
+# ====== ★ lab専用：一覧ページから確実回収（DOM直読 + 正規表現フォールバック） ======
 def _collect_lab_fast(num_pages: int, deadline_ts: Optional[float]) -> List[str]:
     all_urls, seen = [], set()
     with sync_playwright() as pw:
@@ -282,22 +328,25 @@ def _collect_lab_fast(num_pages: int, deadline_ts: Optional[float]) -> List[str]
 
             _bypass_age_gate(page)
 
-            # 遅延ロードを引っ張る（段階スクロール）
+            # 遅延ロードを十分に待つ
+            try:
+                page.wait_for_selector('a[href*="gofile.io/d/"], .bg-white', timeout=8000)
+            except Exception:
+                pass
+
             for _ in range(10):
                 try: page.mouse.wheel(0, 1800)
                 except Exception: pass
                 page.wait_for_timeout(220)
 
-            # ★ DOMの実要素から href と data-系を直接抜く（page.content()は使わない）
+            # 1) DOM の実要素から抽出
             try:
                 hrefs = page.evaluate("""
                   () => {
                     const set = new Set();
-                    // a[href*="gofile.io/d/"]
                     document.querySelectorAll('a[href*="gofile.io/d/"]').forEach(a => {
-                      if (a.href) set.add(a.href);
+                      if (a && a.href) set.add(a.href);
                     });
-                    // data-* に埋められているパターンも吸い上げ
                     document.querySelectorAll('[data-url], [data-href], [data-clipboard-text]').forEach(el => {
                       ['data-url','data-href','data-clipboard-text'].forEach(k => {
                         const v = el.getAttribute(k);
@@ -309,6 +358,15 @@ def _collect_lab_fast(num_pages: int, deadline_ts: Optional[float]) -> List[str]
                 """) or []
             except Exception:
                 hrefs = []
+
+            # 2) フォールバック: HTML 全文から正規表現で抜く
+            try:
+                html = page.content() or ""
+            except Exception:
+                html = ""
+            if html:
+                for m in GOFILE_RE.findall(html):
+                    hrefs.append(m)
 
             added = 0
             for raw in hrefs:
@@ -326,7 +384,7 @@ def _collect_lab_fast(num_pages: int, deadline_ts: Optional[float]) -> List[str]
         ctx.close()
     return all_urls[:RAW_LIMIT]
 
-# ---------- 旧: 一般Playwright（nsnn/orevideoで使用） ----------
+# ====== 一般 Playwright（nsnn/orevideoで使用） ======
 def _extract_article_links_from_list(html: str) -> List[str]:
     soup = BeautifulSoup(html or "", "html.parser")
     links, seen = [], set()
@@ -425,37 +483,20 @@ def _collect_via_playwright(num_pages: int, deadline_ts: Optional[float]) -> Lis
         ctx.close()
     return all_urls[:RAW_LIMIT]
 
-# ---------- 収集エントリ ----------
+# ====== 収集エントリ ======
 def fetch_listing_pages(num_pages: int = 100, deadline_ts: Optional[float] = None) -> List[str]:
-    # gofilelab は DOM直読ルート
+    # gofilelab は専用ルート
     if "gofilelab.com" in (urlparse(BASE_ORIGIN).netloc or ""):
         return _collect_lab_fast(num_pages=num_pages, deadline_ts=deadline_ts)
 
-    # それ以外は従来（sitemap→wp-api→Playwright）
-    s = _build_scraper()
-    def _collect_via_sitemap(num_pages: int, deadline_ts: Optional[float]) -> List[str]:
-        posts = _fetch_sitemap_post_urls(s, max_pages=num_pages, deadline_ts=deadline_ts)
-        if not posts: return []
-        all_urls, seen = [], set()
-        for i, post_url in enumerate(posts, 1):
-            if _deadline_passed(deadline_ts): print(f"[info] sitemap deadline at post {i}; stop."); break
-            try:
-                r = s.get(post_url, timeout=8); r.raise_for_status(); html = r.text
-            except Exception as e:
-                print(f"[warn] sitemap detail fetch failed: {post_url} ({e})"); continue
-            for u in _extract_gofile_from_html(html, s):
-                if u not in seen:
-                    seen.add(u); all_urls.append(u)
-            if len(all_urls) >= RAW_LIMIT: return all_urls[:RAW_LIMIT]
-            time.sleep(0.06)
-        return all_urls[:RAW_LIMIT]
-
+    # それ以外は従来（sitemap → wp-api → playwright）
     urls = _collect_via_sitemap(num_pages=num_pages, deadline_ts=deadline_ts)
     if urls: return urls[:RAW_LIMIT]
-    urls = _collect_via_wp_api(num_pages=num_pages, deadline_ts=deadline_ts)
+    urls = _collect_via_wp_api(num_pages=num_pages, deadline_ts=deadline_ts)  # ← NameError対策で定義済み
     if urls: return urls[:RAW_LIMIT]
     return _collect_via_playwright(num_pages=num_pages, deadline_ts=deadline_ts)
 
+# ====== フィルタ・返却 ======
 def collect_fresh_gofile_urls(
     already_seen: Set[str], want: int = 3, num_pages: int = 100, deadline_sec: Optional[int] = None
 ) -> List[str]:
