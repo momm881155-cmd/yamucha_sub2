@@ -43,18 +43,15 @@ jobs:
         id: monsnode
         timeout-minutes: 10
         env:
-          # monsnode を使う印
           BASE_ORIGIN: "https://monsnode.com"
-          BASE_LIST_URL: "https://monsnode.com"   # monsnode では実質使わないので適当でOK
-          PAGE1_URL: "https://monsnode.com"
 
-          # スクレイピング条件
+          # 速度/件数
           SCRAPE_TIMEOUT_SEC: 240
           RAW_LIMIT: 40
           FILTER_LIMIT: 18
-          NUM_PAGES: 3   # 「各searchの page=0,1,2」くらいから試すのがおすすめ
+          NUM_PAGES: 3      # 必要なら増やす（0,1,2ページ目）
 
-          # 即投稿モード
+          # 即投稿モード（bot.py のロジックはそのまま）
           WANT_POST: 5
           MIN_POST: 3
           USE_API_TIMELINE: 0
@@ -68,19 +65,12 @@ jobs:
           X_ACCESS_TOKEN_SECRET: ${{ secrets.X_ACCESS_TOKEN_SECRET }}
           X_SCREEN_NAME: ${{ vars.X_SCREEN_NAME }}
 
+          # x.gd API キー
+          XGD_API_KEY: ${{ secrets.XGD_API_KEY }}
+
           # Proxy (必要なら)
           HTTP_PROXY: ${{ secrets.HTTP_PROXY }}
           HTTPS_PROXY: ${{ secrets.HTTPS_PROXY }}
-
-          # x.gd の API キー（※GitHub Secrets に追加しておく）
-          XGD_API_KEY: ${{ secrets.XGD_API_KEY }}
-
-          # monsnode の検索URLを増やしたい場合はここに上書きしてもOK（任意）
-          # MONSNODE_SEARCH_URLS: |
-          #   https://monsnode.com/search.php?search=992ultra
-          #   https://monsnode.com/search.php?search=verycoolav
-          #   ...
-
         run: |
           set -e
           python bot.py | tee bot_monsnode.log
