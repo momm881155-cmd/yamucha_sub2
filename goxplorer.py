@@ -1,112 +1,195 @@
-name: Hourly Poster
+# goxplorer.py — monsnode + x.gd 専用版（gofile なし）
 
-on:
-  schedule:
-    - cron: "0 * * * *"   # UTC 毎時00分（= JST 毎時）
-  workflow_dispatch: {}
+import os, re, time
+from urllib.parse import urlparse, urljoin
+from typing import List, Set, Optional
 
-permissions:
-  contents: write
+import requests
+from bs4 import BeautifulSoup
 
-concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+# ====== 設定値 ======
+HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/129.0.0.0 Safari/537.36"
+    ),
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "ja-JP,ja;q=0.9,en-US;q=0.8,en;q=0.7",
+    "Referer": "https://monsnode.com",
+    "Connection": "keep-alive",
+}
 
-jobs:
-  run:
-    runs-on: ubuntu-latest
-    env:
-      BRANCH_NAME: ${{ github.ref_name }}
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+RAW_LIMIT    = int(os.getenv("RAW_LIMIT", "100"))  # 生で集める最大件数
+FILTER_LIMIT = int(os.getenv("FILTER_LIMIT", "50"))  # state などでフィルタした後の上限
 
-      - name: Sync with remote
-        run: |
-          git fetch origin "${BRANCH_NAME}"
-          git pull --rebase origin "${BRANCH_NAME}" || true
+def _now() -> float:
+    return time.monotonic()
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-          cache: "pip"
+def _deadline_passed(deadline_ts: Optional[float]) -> bool:
+    return deadline_ts is not None and _now() >= deadline_ts
 
-      - name: Install deps & Playwright
-        run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
-          python -m playwright install --with-deps chromium
+# ====== x.gd 短縮 ======
+def shorten_via_xgd(long_url: str) -> str:
+    """x.gd の API を使って URL を短縮する。失敗時は元 URL をそのまま返す。"""
+    api_key = os.getenv("XGD_API_KEY", "").strip()
+    if not api_key:
+        return long_url
+    try:
+        r = requests.get(
+            "https://xgd.io/V1/shorten",
+            params={"url": long_url, "key": api_key},
+            timeout=8,
+        )
+        r.raise_for_status()
+        data = r.json()
+        short = (data.get("shorturl") or data.get("short_url") or "").strip()
+        return short or long_url
+    except Exception as e:
+        print(f"[warn] x.gd shorten failed for {long_url}: {e}")
+        return long_url
 
-      # === monsnode 専用 ===
-      - name: Run bot (monsnode)
-        id: monsnode
-        timeout-minutes: 10
-        env:
-          BASE_ORIGIN: "https://monsnode.com"
+# ====== monsnode 検索URL ======
+def _monsnode_search_urls() -> List[str]:
+    """
+    monsnode の検索URL群。
+    環境変数 MONSNODE_SEARCH_URLS で上書き可能（カンマ or 改行区切り）。
+    """
+    env = os.getenv("MONSNODE_SEARCH_URLS", "").strip()
+    if env:
+        parts = re.split(r"[,\n]+", env)
+        urls = [p.strip() for p in parts if p.strip()]
+        if urls:
+            return urls
 
-          # monsnode の検索URLはデフォルトで 5 本埋め込み済み。
-          # 増やしたい場合は MONSNODE_SEARCH_URLS にカンマ区切りで指定:
-          # MONSNODE_SEARCH_URLS: "https://monsnode.com/search.php?search=...,https://..."
-          # MONSNODE_SEARCH_URLS: ${{ vars.MONSNODE_SEARCH_URLS }}
+    # デフォルト（ご指定の5本）
+    return [
+        "https://monsnode.com/search.php?search=992ultra",
+        "https://monsnode.com/search.php?search=verycoolav",
+        "https://monsnode.com/search.php?search=bestav8",
+        "https://monsnode.com/search.php?search=movieszzzz",
+        "https://monsnode.com/search.php?search=himitukessya0",
+    ]
 
-          SCRAPE_TIMEOUT_SEC: 240
-          RAW_LIMIT: 40
-          FILTER_LIMIT: 18
-          NUM_PAGES: 3          # 各検索ワードで page=0,1,2 まで回す想定
+# ====== monsnode 専用：検索結果から /v... の動画ページを集める ======
+def _collect_monsnode_urls(num_pages: int, deadline_ts: Optional[float]) -> List[str]:
+    """
+    monsnode の search 結果から「動画ページURL (https://monsnode.com/v...)」を収集する。
+    ※ .mp4 直リンクは monsnode HTML に出てこないため、/v... ページを投稿用URLとする。
+    """
+    sess = requests.Session()
+    sess.headers.update(HEADERS)
 
-          WANT_POST: 5
-          MIN_POST: 3
-          USE_API_TIMELINE: 0
-          WAIT_ON_RATE_LIMIT: 0
-          HARD_LIMIT_SEC: 600
+    all_urls: List[str] = []
+    seen: Set[str] = set()
 
-          # X keys
-          X_API_KEY: ${{ secrets.X_API_KEY }}
-          X_API_SECRET: ${{ secrets.X_API_SECRET }}
-          X_ACCESS_TOKEN: ${{ secrets.X_ACCESS_TOKEN }}
-          X_ACCESS_TOKEN_SECRET: ${{ secrets.X_ACCESS_TOKEN_SECRET }}
-          X_SCREEN_NAME: ${{ vars.X_SCREEN_NAME }}
+    search_bases = _monsnode_search_urls()
 
-          # x.gd API key
-          XGD_API_KEY: ${{ secrets.XGD_API_KEY }}
+    for base in search_bases:
+        for p in range(0, num_pages):
+            if _deadline_passed(deadline_ts):
+                print(f"[info] monsnode deadline at page {p}; stop.")
+                return all_urls[:RAW_LIMIT]
 
-          # Proxy (optional)
-          HTTP_PROXY: ${{ secrets.HTTP_PROXY }}
-          HTTPS_PROXY: ${{ secrets.HTTPS_PROXY }}
-        run: |
-          set -e
-          python bot.py | tee bot_monsnode.log
-          if grep -q "tweeted id=" bot_monsnode.log; then
-            echo "posted=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "posted=false" >> "$GITHUB_OUTPUT"
-          fi
+            # p=0 はそのまま / p>=1 は ?page=N&s=
+            if p == 0:
+                url = base
+            else:
+                sep = "&" if "?" in base else "?"
+                url = f"{base}{sep}page={p}&s="
 
-      - name: Commit state
-        if: always()
-        env:
-          BRANCH_NAME: ${{ github.ref_name }}
-        run: |
-          set -e
-          if [[ ! -f "state.json" ]]; then
-            echo "state.json not found; skip."; exit 0
-          fi
-          if git diff --quiet -- state.json; then
-            echo "state.json unchanged; skip commit."; exit 0
-          fi
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          cp state.json /tmp/state.json.saved
-          git reset --hard
-          git clean -fdx
-          git fetch origin "${BRANCH_NAME}"
-          git checkout "${BRANCH_NAME}"
-          git pull --rebase origin "${BRANCH_NAME}" || true
-          cp /tmp/state.json.saved state.json
-          if git diff --quiet -- state.json; then
-            echo "state.json equal to remote; skip commit."; exit 0
-          fi
-          git add state.json
-          git commit -m "chore: update state $(date -u +'%Y-%m-%dT%H:%M:%SZ')"
-          git push origin "${BRANCH_NAME}"
+            try:
+                r = sess.get(url, timeout=10)
+                r.raise_for_status()
+                html = r.text
+            except Exception as e:
+                print(f"[warn] monsnode fetch failed: {url} ({e})")
+                break  # この検索ワードは打ち切り
+
+            soup = BeautifulSoup(html or "", "html.parser")
+            added = 0
+            for a in soup.find_all("a", href=True):
+                href = a["href"].strip()
+                if not href or href.startswith("#") or href.startswith("javascript:"):
+                    continue
+
+                full = urljoin(base, href)
+                pr = urlparse(full)
+
+                # monsnode ドメインのみ対象
+                if "monsnode.com" not in (pr.netloc or ""):
+                    continue
+
+                # /v1234567890 の形式だけ採用
+                if not re.match(r"^/v[0-9]+$", pr.path):
+                    continue
+
+                if full not in seen:
+                    seen.add(full)
+                    all_urls.append(full)
+                    added += 1
+                    if len(all_urls) >= RAW_LIMIT:
+                        print(f"[info] monsnode early stop at RAW_LIMIT={RAW_LIMIT}")
+                        return all_urls[:RAW_LIMIT]
+
+            print(f"[info] monsnode list {url}: +{added} detail urls (total {len(all_urls)})")
+            time.sleep(0.1)
+
+    return all_urls[:RAW_LIMIT]
+
+# ====== 収集エントリ（bot.py からまずここが呼ばれるイメージ） ======
+def fetch_listing_pages(num_pages: int = 100, deadline_ts: Optional[float] = None) -> List[str]:
+    # 今回は monsnode 専用設計
+    return _collect_monsnode_urls(num_pages=num_pages, deadline_ts=deadline_ts)
+
+# ====== フィルタ・返却（bot.py から直接呼ばれる関数） ======
+def collect_fresh_gofile_urls(
+    already_seen: Set[str], want: int = 3, num_pages: int = 100, deadline_sec: Optional[int] = None
+) -> List[str]:
+    """
+    bot.py から呼ばれるメイン関数。
+    - monsnode の /v... ページURLを集める
+    - state.json で既出URLを除外
+    - x.gd で短縮
+    - WANT_POST 件だけ返却
+    """
+    if deadline_sec is None:
+        _env = os.getenv("SCRAPE_TIMEOUT_SEC")
+        try:
+            if _env:
+                deadline_sec = int(_env)
+        except Exception:
+            deadline_sec = None
+
+    deadline_ts = (_now() + deadline_sec) if deadline_sec else None
+
+    # monsnode から /v... を集める
+    raw = fetch_listing_pages(num_pages=num_pages, deadline_ts=deadline_ts)
+
+    # state.json にあるURL（短縮後 URL も含む）は除外
+    candidates = [u for u in raw if u not in already_seen][:max(1, FILTER_LIMIT)]
+
+    results: List[str] = []
+    seen_now: Set[str] = set()
+
+    for url in candidates:
+        if _deadline_passed(deadline_ts):
+            print("[info] deadline reached during filtering; stop.")
+            break
+        if url in seen_now:
+            continue
+
+        # ★ ここで x.gd で短縮
+        short = shorten_via_xgd(url)
+
+        # すでに投稿済みの短縮URLもスキップ
+        if short in already_seen:
+            continue
+
+        seen_now.add(url)
+        results.append(short)
+
+        if len(results) >= want:
+            break
+
+    return results[:want]
