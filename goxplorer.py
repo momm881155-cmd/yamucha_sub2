@@ -1,136 +1,244 @@
-# goxplorer.py — monsnode 専用スクレイパー
-import os, re, time
+# goxplorer.py — monsnode + x.gd 専用版（bot.py 互換）
+
+import os
+import re
+import time
 from urllib.parse import urljoin
-from datetime import datetime, timezone, timedelta
+from typing import List, Set, Optional
 
 import requests
 from bs4 import BeautifulSoup
 from playwright.sync_api import sync_playwright
 
-
 # =========================
 #   設定
 # =========================
 
+# monsnode のベースURL
 BASE_ORIGIN = os.getenv("BASE_ORIGIN", "https://monsnode.com").rstrip("/")
+
 HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
         "AppleWebKit/537.36 (KHTML, like Gecko) "
         "Chrome/123.0.0.0 Safari/537.36"
-    )
+    ),
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "ja-JP,ja;q=0.9,en-US;q=0.8,en;q=0.7",
+    "Referer": "https://monsnode.com",
+    "Connection": "keep-alive",
 }
 
-SEARCH_WORDS = [
-    "992ultra",
-    "verycoolav",
-    "bestav8",
-    "movieszzzz",
-    "himitukessya0"
-]
+# 1回の収集での最大生URL件数・フィルタ後上限
+RAW_LIMIT    = int(os.getenv("RAW_LIMIT", "100"))
+FILTER_LIMIT = int(os.getenv("FILTER_LIMIT", "50"))
 
-# mp4 URL抽出
-MP4_RE = re.compile(r"https://video\.twimg\.com/.+?\.mp4[^\s\"']*", re.I)
+# monsnode 検索ワード（環境変数で増減も可能）
+def _monsnode_search_words() -> List[str]:
+    env = os.getenv("MONSNODE_SEARCH_TERMS", "").strip()
+    if env:
+        parts = re.split(r"[,\n]+", env)
+        words = [p.strip() for p in parts if p.strip()]
+        if words:
+            return words
+
+    # デフォルト（ご指定の5つ）
+    return [
+        "992ultra",
+        "verycoolav",
+        "bestav8",
+        "movieszzzz",
+        "himitukessya0",
+    ]
+
+
+# video.twimg.com の mp4 抽出
+MP4_RE = re.compile(
+    r"https://video\.twimg\.com/[^\s\"']*?\.mp4[^\s\"']*",
+    re.I,
+)
+
+
+def _now() -> float:
+    return time.monotonic()
+
+
+def _deadline_passed(deadline_ts: Optional[float]) -> bool:
+    return deadline_ts is not None and _now() >= deadline_ts
 
 
 # =========================
-#   X.gd 短縮
+#   x.gd 短縮
 # =========================
-def shorten_xgd(long_url: str) -> str:
-    api_key = os.getenv("XGD_API_KEY", "")
+
+def shorten_via_xgd(long_url: str) -> str:
+    """
+    x.gd の API を使って URL を短縮する。
+    失敗時は元URLのまま返す。
+    """
+    api_key = os.getenv("XGD_API_KEY", "").strip()
     if not api_key:
         return long_url
 
     try:
+        # ドキュメントに合わせて create.php or V1/shorten などAPI仕様に応じて変更
         r = requests.get(
-            "https://x.gd/create.php",
+            "https://xgd.io/V1/shorten",
             params={"url": long_url, "key": api_key},
             headers=HEADERS,
-            timeout=15,
+            timeout=10,
         )
-        if r.status_code == 200 and r.text.startswith("http"):
-            return r.text.strip()
-    except Exception:
-        pass
+        r.raise_for_status()
+        data = r.json()
+        short = (data.get("shorturl") or data.get("short_url") or "").strip()
+        if short:
+            return short
+    except Exception as e:
+        print(f"[warn] x.gd shorten failed for {long_url}: {e}")
+
     return long_url
 
 
 # =========================
-#   ページを Playwright で取得
+#   Playwright 共通
 # =========================
-def fetch_html(url: str, timeout_ms=15000):
+
+def _playwright_ctx(pw):
+    browser = pw.chromium.launch(
+        headless=True,
+        args=[
+            "--no-sandbox",
+            "--disable-blink-features=AutomationControlled",
+        ],
+    )
+    ctx = browser.new_context(
+        user_agent=HEADERS["User-Agent"],
+        locale="ja-JP",
+        viewport={"width": 1360, "height": 2400},
+    )
+    ctx.add_init_script("""
+        Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
+        window.chrome = { runtime: {} };
+        Object.defineProperty(navigator, 'plugins', { get: () => [1,2,3] });
+        Object.defineProperty(navigator, 'languages', { get: () => ['ja-JP','ja'] });
+    """)
+    return ctx
+
+
+def fetch_html_with_playwright(url: str, timeout_ms: int = 20000) -> Optional[str]:
+    """
+    monsnode は requests だと 403 が出るので、Playwright で HTML を取得。
+    """
     try:
-        with sync_playwright() as p:
-            browser = p.chromium.launch(headless=True, args=["--no-sandbox"])
-            ctx = browser.new_context(user_agent=HEADERS["User-Agent"])
+        with sync_playwright() as pw:
+            ctx = _playwright_ctx(pw)
             page = ctx.new_page()
+            page.set_extra_http_headers({
+                "Accept": HEADERS["Accept"],
+                "Accept-Language": HEADERS["Accept-Language"],
+                "Referer": HEADERS["Referer"],
+                "Connection": HEADERS["Connection"],
+            })
 
             page.goto(url, wait_until="domcontentloaded", timeout=timeout_ms)
-            page.wait_for_timeout(800)
+            # 軽くスクロールして遅延ロードを促す
+            try:
+                for _ in range(4):
+                    page.mouse.wheel(0, 1400)
+                    page.wait_for_timeout(200)
+            except Exception:
+                pass
 
             html = page.content()
-
             ctx.close()
-            browser.close()
             return html
     except Exception as e:
-        print(f"[warn] fetch_html fail {url}: {e}")
+        print(f"[warn] fetch_html_with_playwright failed: {url} ({e})")
         return None
+
+
+# =========================
+#   一覧ページ → 詳細リンク抽出
+# =========================
+
+def extract_detail_links_from_list(html: str) -> List[str]:
+    """
+    検索結果ページから動画詳細ページへのリンクを抽出する。
+    例: <a href="/v1951182235140274713"> ... </a>
+    """
+    if not html:
+        return []
+
+    soup = BeautifulSoup(html, "html.parser")
+    links: List[str] = []
+    seen: Set[str] = set()
+
+    # href に "/v" を含む a タグをすべて拾う（以前は ^/v[0-9]+$ にしていて取りこぼしの可能性あり）
+    for a in soup.find_all("a", href=True):
+        href = a["href"].strip()
+        if "/v" not in href:
+            continue
+        full = urljoin(BASE_ORIGIN, href)
+        if full not in seen:
+            seen.add(full)
+            links.append(full)
+
+    return links
 
 
 # =========================
 #   詳細ページ → mp4 抽出
 # =========================
-def extract_mp4_urls_from_detail(url: str) -> list:
-    html = fetch_html(url)
+
+def extract_mp4_urls_from_detail(url: str) -> List[str]:
+    """
+    動画詳細ページ（/v....）から video.twimg.com の .mp4 を抽出。
+    """
+    html = fetch_html_with_playwright(url)
     if not html:
         return []
+
     found = MP4_RE.findall(html)
-    return list(set(found))
+    uniq: List[str] = []
+    seen: Set[str] = set()
+    for u in found:
+        u = u.strip()
+        if u and u not in seen:
+            seen.add(u)
+            uniq.append(u)
+
+    return uniq
 
 
 # =========================
-#   一覧ページから detail リンク抽出
+#   monsnode 専用収集ルート
 # =========================
-def extract_detail_links_from_list(html: str) -> list:
-    soup = BeautifulSoup(html, "html.parser")
-    links = []
-    for a in soup.find_all("a", href=True):
-        href = a["href"]
-        # /v12345 の形式
-        if re.match(r"^/v[0-9]+$", href):
-            links.append(urljoin(BASE_ORIGIN, href))
-    return list(set(links))
 
+def _collect_monsnode_urls(num_pages: int, deadline_ts: Optional[float]) -> List[str]:
+    """
+    monsnode の search 結果から、
+    - /v... 形式の動画ページURLを取得
+    - そこから mp4 を抜き出し
+    元の mp4 URLを返す（短縮は別フェーズ）。
+    """
+    all_mp4: List[str] = []
+    seen_mp4: Set[str] = set()
 
-# =========================
-#   monsnode 収集メイン
-# =========================
-def collect_fresh_gofile_urls(
-    already_seen: set,
-    want: int,
-    num_pages: int = 3,
-    deadline_sec: int = 240
-) -> list:
+    search_words = _monsnode_search_words()
 
-    start_time = time.time()
-    collected = []
-
-    for word in SEARCH_WORDS:
-
-        # 各キーワード
+    for word in search_words:
         for page in range(1, num_pages + 1):
+            if _deadline_passed(deadline_ts):
+                print(f"[info] monsnode deadline at search={word}, page={page}; stop.")
+                return all_mp4[:RAW_LIMIT]
 
-            elapsed = time.time() - start_time
-            if deadline_sec and elapsed > deadline_sec:
-                print("[info] deadline reached; stop.")
-                return collected
-
-            list_url = f"{BASE_ORIGIN}/search.php?search={word}"
-            if page > 1:
+            # 1ページ目と2ページ目以降でURLが違う仕様に対応
+            if page == 1:
+                list_url = f"{BASE_ORIGIN}/search.php?search={word}"
+            else:
                 list_url = f"{BASE_ORIGIN}/search.php?search={word}&page={page}&s="
 
-            html = fetch_html(list_url)
+            html = fetch_html_with_playwright(list_url)
             if not html:
                 print(f"[warn] monsnode fetch failed: {list_url}")
                 continue
@@ -139,17 +247,94 @@ def collect_fresh_gofile_urls(
             print(f"[info] monsnode list {list_url}: found {len(detail_links)} detail links")
 
             for durl in detail_links:
-                if len(collected) >= want:
-                    return collected
+                if _deadline_passed(deadline_ts):
+                    print("[info] monsnode deadline during detail; stop.")
+                    return all_mp4[:RAW_LIMIT]
 
+                # 各 /v... ページから mp4 抽出
                 mp4s = extract_mp4_urls_from_detail(durl)
-                for mp4 in mp4s:
-                    if mp4 in already_seen:
-                        continue
-                    shorted = shorten_xgd(mp4)
-                    collected.append(shorted)
+                for m in mp4s:
+                    if m not in seen_mp4:
+                        seen_mp4.add(m)
+                        all_mp4.append(m)
+                        if len(all_mp4) >= RAW_LIMIT:
+                            print(f"[info] monsnode early stop at RAW_LIMIT={RAW_LIMIT}")
+                            return all_mp4[:RAW_LIMIT]
 
-                    if len(collected) >= want:
-                        return collected
+            time.sleep(0.1)
 
-    return collected
+    return all_mp4[:RAW_LIMIT]
+
+
+# =========================
+#   fetch_listing_pages (bot.py 互換)
+# =========================
+
+def fetch_listing_pages(
+    num_pages: int = 100,
+    deadline_ts: Optional[float] = None
+) -> List[str]:
+    """
+    旧 goxplorer にあったインターフェイス互換。
+    monsnode 専用で mp4 URL リストを返す。
+    """
+    return _collect_monsnode_urls(num_pages=num_pages, deadline_ts=deadline_ts)
+
+
+# =========================
+#   collect_fresh_gofile_urls (bot.py から呼ばれるメイン)
+# =========================
+
+def collect_fresh_gofile_urls(
+    already_seen: Set[str],
+    want: int = 3,
+    num_pages: int = 100,
+    deadline_sec: Optional[int] = None
+) -> List[str]:
+    """
+    bot.py から呼び出されるメイン関数。
+    - monsnode から mp4 URL を集める
+    - state.json 由来の already_seen でフィルタ
+    - x.gd で短縮
+    - WANT_POST 件だけ返却
+    """
+
+    if deadline_sec is None:
+        _env = os.getenv("SCRAPE_TIMEOUT_SEC")
+        try:
+            if _env:
+                deadline_sec = int(_env)
+        except Exception:
+            deadline_sec = None
+
+    deadline_ts = (_now() + deadline_sec) if deadline_sec else None
+
+    # 生の mp4 URL 一覧
+    raw_mp4 = fetch_listing_pages(num_pages=num_pages, deadline_ts=deadline_ts)
+
+    # 既出除外（元URL & 短縮URL どちらでもヒットしたらスキップしたいので、まずは元URLで見る）
+    candidates = [u for u in raw_mp4 if u not in already_seen][:max(1, FILTER_LIMIT)]
+
+    results: List[str] = []
+    seen_now: Set[str] = set()
+
+    for url in candidates:
+        if _deadline_passed(deadline_ts):
+            print("[info] deadline reached during filtering; stop.")
+            break
+        if url in seen_now:
+            continue
+
+        short = shorten_via_xgd(url)
+
+        # 短縮後URLも state.json にあったらスキップ
+        if short in already_seen:
+            continue
+
+        seen_now.add(url)
+        results.append(short)
+
+        if len(results) >= want:
+            break
+
+    return results[:want]
