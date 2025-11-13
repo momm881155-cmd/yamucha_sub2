@@ -1,13 +1,15 @@
-# goxplorer.py — monsnode + x.gd 専用版（gofile なし）
+# goxplorer.py — monsnode + x.gd 専用版（Playwrightで403回避）
 
 import os, re, time
 from urllib.parse import urlparse, urljoin
 from typing import List, Set, Optional
 
 import requests
-from bs4 import BeautifulSoup
+from playwright.sync_api import sync_playwright
 
 # ====== 設定値 ======
+BASE_ORIGIN = os.getenv("BASE_ORIGIN", "https://monsnode.com")..rstrip("/")
+
 HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -16,7 +18,7 @@ HEADERS = {
     ),
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
     "Accept-Language": "ja-JP,ja;q=0.9,en-US;q=0.8,en;q=0.7",
-    "Referer": "https://monsnode.com",
+    "Referer": BASE_ORIGIN,
     "Connection": "keep-alive",
 }
 
@@ -71,75 +73,108 @@ def _monsnode_search_urls() -> List[str]:
         "https://monsnode.com/search.php?search=himitukessya0",
     ]
 
-# ====== monsnode 専用：検索結果から /v... の動画ページを集める ======
+# ====== Playwright 共通 ======
+def _playwright_ctx(pw):
+    browser = pw.chromium.launch(headless=True, args=[
+        "--no-sandbox",
+        "--disable-blink-features=AutomationControlled",
+    ])
+    ctx = browser.new_context(
+        user_agent=HEADERS["User-Agent"],
+        locale="ja-JP",
+        viewport={"width": 1360, "height": 2400},
+    )
+    ctx.add_init_script("""
+        Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
+        window.chrome = { runtime: {} };
+        Object.defineProperty(navigator, 'plugins', { get: () => [1,2,3] });
+        Object.defineProperty(navigator, 'languages', { get: () => ['ja-JP','ja'] });
+    """)
+    return ctx
+
+# ====== monsnode 専用：Playwrightで検索結果から /v... を集める ======
 def _collect_monsnode_urls(num_pages: int, deadline_ts: Optional[float]) -> List[str]:
     """
     monsnode の search 結果から「動画ページURL (https://monsnode.com/v...)」を収集する。
     ※ .mp4 直リンクは monsnode HTML に出てこないため、/v... ページを投稿用URLとする。
     """
-    sess = requests.Session()
-    sess.headers.update(HEADERS)
-
     all_urls: List[str] = []
     seen: Set[str] = set()
-
     search_bases = _monsnode_search_urls()
 
-    for base in search_bases:
-        for p in range(0, num_pages):
-            if _deadline_passed(deadline_ts):
-                print(f"[info] monsnode deadline at page {p}; stop.")
-                return all_urls[:RAW_LIMIT]
+    with sync_playwright() as pw:
+        ctx = _playwright_ctx(pw)
+        page = ctx.new_page()
+        page.set_extra_http_headers({
+            "Accept": HEADERS["Accept"],
+            "Accept-Language": HEADERS["Accept-Language"],
+            "Referer": HEADERS["Referer"],
+            "Connection": HEADERS["Connection"],
+        })
 
-            # p=0 はそのまま / p>=1 は ?page=N&s=
-            if p == 0:
-                url = base
-            else:
-                sep = "&" if "?" in base else "?"
-                url = f"{base}{sep}page={p}&s="
+        for base in search_bases:
+            for p in range(0, num_pages):
+                if _deadline_passed(deadline_ts):
+                    print(f"[info] monsnode deadline at page {p}; stop.")
+                    ctx.close()
+                    return all_urls[:RAW_LIMIT]
 
-            try:
-                r = sess.get(url, timeout=10)
-                r.raise_for_status()
-                html = r.text
-            except Exception as e:
-                print(f"[warn] monsnode fetch failed: {url} ({e})")
-                break  # この検索ワードは打ち切り
+                if p == 0:
+                    url = base
+                else:
+                    sep = "&" if "?" in base else "?"
+                    url = f"{base}{sep}page={p}&s="
 
-            soup = BeautifulSoup(html or "", "html.parser")
-            added = 0
-            for a in soup.find_all("a", href=True):
-                href = a["href"].strip()
-                if not href or href.startswith("#") or href.startswith("javascript:"):
-                    continue
+                try:
+                    page.goto(url, wait_until="domcontentloaded", timeout=20000)
+                except Exception as e:
+                    print(f"[warn] monsnode list goto failed: {url} ({e})")
+                    break  # この検索ワードは打ち切り
 
-                full = urljoin(base, href)
-                pr = urlparse(full)
+                # 軽くスクロールしてロードを促す
+                try:
+                    for _ in range(4):
+                        page.mouse.wheel(0, 1200)
+                        page.wait_for_timeout(200)
+                except Exception:
+                    pass
 
-                # monsnode ドメインのみ対象
-                if "monsnode.com" not in (pr.netloc or ""):
-                    continue
+                try:
+                    detail_links = page.evaluate("""
+                        () => Array.from(document.querySelectorAll('a[href*="/v"]'))
+                                   .map(a => a.href)
+                    """) or []
+                except Exception:
+                    detail_links = []
 
-                # /v1234567890 の形式だけ採用
-                if not re.match(r"^/v[0-9]+$", pr.path):
-                    continue
+                added = 0
+                for full in detail_links:
+                    if not full:
+                        continue
+                    pr = urlparse(full)
+                    if "monsnode.com" not in (pr.netloc or ""):
+                        continue
+                    if not re.match(r"^/v[0-9]+$", pr.path):
+                        continue
+                    if full not in seen:
+                        seen.add(full)
+                        all_urls.append(full)
+                        added += 1
+                        if len(all_urls) >= RAW_LIMIT:
+                            print(f"[info] monsnode early stop at RAW_LIMIT={RAW_LIMIT}")
+                            ctx.close()
+                            return all_urls[:RAW_LIMIT]
 
-                if full not in seen:
-                    seen.add(full)
-                    all_urls.append(full)
-                    added += 1
-                    if len(all_urls) >= RAW_LIMIT:
-                        print(f"[info] monsnode early stop at RAW_LIMIT={RAW_LIMIT}")
-                        return all_urls[:RAW_LIMIT]
+                print(f"[info] monsnode list {url}: +{added} detail urls (total {len(all_urls)})")
+                page.wait_for_timeout(200)
 
-            print(f"[info] monsnode list {url}: +{added} detail urls (total {len(all_urls)})")
-            time.sleep(0.1)
+        ctx.close()
 
     return all_urls[:RAW_LIMIT]
 
-# ====== 収集エントリ（bot.py からまずここが呼ばれるイメージ） ======
+# ====== 収集エントリ（bot.py から呼ばれる） ======
 def fetch_listing_pages(num_pages: int = 100, deadline_ts: Optional[float] = None) -> List[str]:
-    # 今回は monsnode 専用設計
+    # monsnode 専用
     return _collect_monsnode_urls(num_pages=num_pages, deadline_ts=deadline_ts)
 
 # ====== フィルタ・返却（bot.py から直接呼ばれる関数） ======
@@ -148,7 +183,7 @@ def collect_fresh_gofile_urls(
 ) -> List[str]:
     """
     bot.py から呼ばれるメイン関数。
-    - monsnode の /v... ページURLを集める
+    - monsnode の /v... ページURLを Playwright で集める
     - state.json で既出URLを除外
     - x.gd で短縮
     - WANT_POST 件だけ返却
@@ -179,7 +214,6 @@ def collect_fresh_gofile_urls(
         if url in seen_now:
             continue
 
-        # ★ ここで x.gd で短縮
         short = shorten_via_xgd(url)
 
         # すでに投稿済みの短縮URLもスキップ
