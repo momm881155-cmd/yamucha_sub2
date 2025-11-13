@@ -43,35 +43,33 @@ jobs:
         id: monsnode
         timeout-minutes: 10
         env:
+          # monsnode 側
           BASE_ORIGIN: "https://monsnode.com"
 
-          # monsnode の検索URLはデフォルトで 5 本埋め込み済み。
-          # 増やしたい場合は MONSNODE_SEARCH_URLS にカンマ区切りで指定:
-          # MONSNODE_SEARCH_URLS: "https://monsnode.com/search.php?search=...,https://..."
-          # MONSNODE_SEARCH_URLS: ${{ vars.MONSNODE_SEARCH_URLS }}
-
+          # 収集関連
           SCRAPE_TIMEOUT_SEC: 240
           RAW_LIMIT: 40
           FILTER_LIMIT: 18
-          NUM_PAGES: 3          # 各検索ワードで page=0,1,2 まで回す想定
+          NUM_PAGES: 3   # 各 search ワードについて page=1〜3 まで回す想定
 
+          # 投稿ロジック（bot.py そのまま利用）
           WANT_POST: 5
           MIN_POST: 3
           USE_API_TIMELINE: 0
           WAIT_ON_RATE_LIMIT: 0
           HARD_LIMIT_SEC: 600
 
-          # X keys
+          # X(Twitter) API keys（リポジトリ Secrets に入れておく）
           X_API_KEY: ${{ secrets.X_API_KEY }}
           X_API_SECRET: ${{ secrets.X_API_SECRET }}
           X_ACCESS_TOKEN: ${{ secrets.X_ACCESS_TOKEN }}
           X_ACCESS_TOKEN_SECRET: ${{ secrets.X_ACCESS_TOKEN_SECRET }}
           X_SCREEN_NAME: ${{ vars.X_SCREEN_NAME }}
 
-          # x.gd API key
+          # x.gd API key（これも Secrets に）
           XGD_API_KEY: ${{ secrets.XGD_API_KEY }}
 
-          # Proxy (optional)
+          # Proxy (必要なければ空のままでOK)
           HTTP_PROXY: ${{ secrets.HTTP_PROXY }}
           HTTPS_PROXY: ${{ secrets.HTTPS_PROXY }}
         run: |
