@@ -1,4 +1,5 @@
-# goxplorer.py — lab専用: DOM直読 + 詳細ページ追撃 / 正規表現フォールバック / http→https 正規化
+# goxplorer.py — monsnode + x.gd 対応版（完全置き換え用）
+
 import os, re, time
 from html import unescape
 from urllib.parse import urlparse, parse_qs, unquote, urljoin
@@ -22,6 +23,7 @@ WP_POSTS_API  = BASE_ORIGIN + "/wp-json/wp/v2/posts?page={page}&per_page=20&_fie
 SITEMAP_INDEX = BASE_ORIGIN + "/sitemap_index.xml"
 
 GOFILE_RE = re.compile(r"https?://gofile\.io/d/[A-Za-z0-9]+", re.I)
+MP4_RE    = re.compile(r"https?://[^\s\"'>]+\.mp4\b", re.I)
 _LOC_RE   = re.compile(r"<loc>(.*?)</loc>", re.IGNORECASE | re.DOTALL)
 
 HEADERS = {
@@ -62,7 +64,7 @@ def _build_scraper():
 
 def fix_scheme(url: str) -> str:
     if url.startswith("htps://"): return "https://" + url[len("htps://"):]
-    if url.startswith("http://gofile.io/"):  # ★ http→https を強制
+    if url.startswith("http://gofile.io/"):  # ★ http→https を強制（過去互換用）
         return "https://" + url[len("http://"):]
     return url
 
@@ -78,6 +80,7 @@ _DEATH_MARKERS = (
     "has been deleted by the owner",
 )
 def is_gofile_alive(url: str) -> bool:
+    """元 gofile 専用の死活確認。monsnode(mp4)では使用しない。"""
     url = fix_scheme(url)
     s = _build_scraper()
     try:
@@ -94,7 +97,27 @@ def is_gofile_alive(url: str) -> bool:
     except Exception:
         return True  # 断定不可は通す
 
-# ====== 抽出ユーティリティ ======
+# ====== x.gd 短縮 ======
+def shorten_via_xgd(long_url: str) -> str:
+    """x.gd の API を使って URL を短縮する。失敗時は元 URL をそのまま返す。"""
+    api_key = os.getenv("XGD_API_KEY", "").strip()
+    if not api_key:
+        return long_url
+    try:
+        r = requests.get(
+            "https://xgd.io/V1/shorten",
+            params={"url": long_url, "key": api_key},
+            timeout=8,
+        )
+        r.raise_for_status()
+        data = r.json()
+        short = (data.get("shorturl") or data.get("short_url") or "").strip()
+        return short or long_url
+    except Exception as e:
+        print(f"[warn] x.gd shorten failed for {long_url}: {e}")
+        return long_url
+
+# ====== 抽出ユーティリティ（gofile 用／mp4 用） ======
 def _resolve_to_gofile(url: str, scraper, timeout: int = 4) -> Optional[str]:
     if not url: return None
     url = fix_scheme(url)
@@ -140,6 +163,35 @@ def _extract_gofile_from_html(html: str, scraper) -> List[str]:
         u = fix_scheme(m.strip())
         if u and u not in seen:
             seen.add(u); urls.append(u)
+    return urls
+
+def _extract_mp4_urls_from_html(html: str) -> List[str]:
+    """monsnode ページから .mp4 URL を抽出する。"""
+    if not html:
+        return []
+    urls, seen = [], set()
+    soup = BeautifulSoup(html, "html.parser")
+
+    # a / video / source から拾う
+    for tag_name, attr in [("a", "href"), ("video", "src"), ("source", "src")]:
+        for tag in soup.find_all(tag_name):
+            href = (tag.get(attr) or "").strip()
+            if not href:
+                continue
+            m = MP4_RE.search(href)
+            if m:
+                u = m.group(0)
+                if u not in seen:
+                    seen.add(u)
+                    urls.append(u)
+
+    # 生HTML全体からも拾う（保険）
+    for m in MP4_RE.findall(html):
+        u = m.strip()
+        if u not in seen:
+            seen.add(u)
+            urls.append(u)
+
     return urls
 
 # ====== sitemap / wp-api（一般サイト向け） ======
@@ -298,7 +350,7 @@ def _bypass_age_gate(page):
     try: page.wait_for_load_state("networkidle", timeout=8000)
     except Exception: pass
 
-# ====== ★ lab専用：一覧 + 詳細ページ追撃 ======
+# ====== ★ lab専用：一覧 + 詳細ページ追撃（gofilelab用に残しておく） ======
 def _collect_lab_fast(num_pages: int, deadline_ts: Optional[float]) -> List[str]:
     all_urls, seen_gofile, seen_posts = [], set(), set()
     with sync_playwright() as pw:
@@ -370,7 +422,6 @@ def _collect_lab_fast(num_pages: int, deadline_ts: Optional[float]) -> List[str]
                         ctx.close(); return all_urls[:RAW_LIMIT]
 
             # ★ 2) 直書きが少ない場合は、一覧から内部の詳細リンクを集め、詳細で gofile を抽出
-            #    （これが今回 0 件を救う本命）
             article_links = set()
             try:
                 anchors = page.evaluate("""
@@ -438,7 +489,7 @@ def _collect_lab_fast(num_pages: int, deadline_ts: Optional[float]) -> List[str]
         ctx.close()
     return all_urls[:RAW_LIMIT]
 
-# ====== 一般 Playwright（nsnn/orevideoで使用） ======
+# ====== 一般 Playwright（nsnn/orevideoで使用・互換のため残す） ======
 def _extract_article_links_from_list(html: str) -> List[str]:
     soup = BeautifulSoup(html or "", "html.parser")
     links, seen = [], set()
@@ -537,16 +588,85 @@ def _collect_via_playwright(num_pages: int, deadline_ts: Optional[float]) -> Lis
         ctx.close()
     return all_urls[:RAW_LIMIT]
 
+# ====== monsnode 専用収集 ======
+def _monsnode_search_urls() -> List[str]:
+    """monsnode の検索URL群。環境変数 MONSNODE_SEARCH_URLS で増減可能。"""
+    env = os.getenv("MONSNODE_SEARCH_URLS", "").strip()
+    if env:
+        parts = re.split(r"[,\n]+", env)
+        urls = [p.strip() for p in parts if p.strip()]
+        if urls:
+            return urls
+
+    # デフォルト（ご指定の5本）
+    return [
+        "https://monsnode.com/search.php?search=992ultra",
+        "https://monsnode.com/search.php?search=verycoolav",
+        "https://monsnode.com/search.php?search=bestav8",
+        "https://monsnode.com/search.php?search=movieszzzz",
+        "https://monsnode.com/search.php?search=himitukessya0",
+    ]
+
+def _collect_monsnode_mp4(num_pages: int, deadline_ts: Optional[float]) -> List[str]:
+    """monsnode の search 結果から .mp4 URL を収集する。毎回 1ページ目から走査。"""
+    s = _build_scraper()
+    all_urls, seen = [], set()
+
+    search_bases = _monsnode_search_urls()
+
+    for base in search_bases:
+        for p in range(0, num_pages):
+            if _deadline_passed(deadline_ts):
+                print(f"[info] monsnode deadline at page {p}; stop.")
+                return all_urls[:RAW_LIMIT]
+
+            if p == 0:
+                url = base
+            else:
+                # 例: https://monsnode.com/search.php?search=992ultra&page=1&s=
+                sep = "&" if "?" in base else "?"
+                url = f"{base}{sep}page={p}&s="
+
+            try:
+                r = s.get(url, timeout=10)
+                r.raise_for_status()
+                html = r.text
+            except Exception as e:
+                print(f"[warn] monsnode fetch failed: {url} ({e})")
+                break  # この search は打ち切り
+
+            urls = _extract_mp4_urls_from_html(html)
+            added = 0
+            for u in urls:
+                if u not in seen:
+                    seen.add(u)
+                    all_urls.append(u)
+                    added += 1
+                    if len(all_urls) >= RAW_LIMIT:
+                        print(f"[info] monsnode early stop at RAW_LIMIT={RAW_LIMIT}")
+                        return all_urls[:RAW_LIMIT]
+
+            print(f"[info] monsnode {url}: +{added} (total {len(all_urls)})")
+            time.sleep(0.1)
+
+    return all_urls[:RAW_LIMIT]
+
 # ====== 収集エントリ ======
 def fetch_listing_pages(num_pages: int = 100, deadline_ts: Optional[float] = None) -> List[str]:
-    # gofilelab は専用ルート
-    if "gofilelab.com" in (urlparse(BASE_ORIGIN).netloc or ""):
+    host = urlparse(BASE_ORIGIN).hostname or ""
+
+    # monsnode.com は専用ルート
+    if "monsnode.com" in (host or ""):
+        return _collect_monsnode_mp4(num_pages=num_pages, deadline_ts=deadline_ts)
+
+    # gofilelab は専用ルート（互換のため残す）
+    if "gofilelab.com" in (host or ""):
         return _collect_lab_fast(num_pages=num_pages, deadline_ts=deadline_ts)
 
     # それ以外は従来（sitemap → wp-api → playwright）
     urls = _collect_via_sitemap(num_pages=num_pages, deadline_ts=deadline_ts)
     if urls: return urls[:RAW_LIMIT]
-    urls = _collect_via_wp_api(num_pages=num_pages, deadline_ts=deadline_ts)  # ← 定義済み
+    urls = _collect_via_wp_api(num_pages=num_pages, deadline_ts=deadline_ts)
     if urls: return urls[:RAW_LIMIT]
     return _collect_via_playwright(num_pages=num_pages, deadline_ts=deadline_ts)
 
@@ -564,13 +684,27 @@ def collect_fresh_gofile_urls(
 
     raw = fetch_listing_pages(num_pages=num_pages, deadline_ts=deadline_ts)
 
-    candidates = [fix_scheme(u) for u in raw if u not in already_seen][:max(1, FILTER_LIMIT)]
+    # state.json にあるURL（短縮後URLも含む）は除外
+    candidates = [u for u in raw if u not in already_seen][:max(1, FILTER_LIMIT)]
+
     uniq, seen_now = [], set()
+    host = urlparse(BASE_ORIGIN).hostname or ""
+    is_monsnode = "monsnode.com" in (host or "")
+
     for url in candidates:
         if _deadline_passed(deadline_ts):
             print("[info] deadline reached during filtering; stop."); break
         if url in seen_now: continue
-        if is_gofile_alive(url):
+
+        alive = True
+        # monsnode (.mp4) のときは死活チェック不要
+        if not is_monsnode:
+            alive = is_gofile_alive(url)
+
+        if alive:
             uniq.append(url); seen_now.add(url)
-            if len(uniq) >= want: return uniq[:want]
-    return uniq[:want]
+            if len(uniq) >= want: break
+
+    # ★ ここで x.gd で短縮してから bot.py に渡す
+    shortened = [shorten_via_xgd(u) for u in uniq]
+    return shortened[:want]
