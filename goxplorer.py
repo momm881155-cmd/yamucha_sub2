@@ -1,4 +1,4 @@
-# goxplorer.py — 汎用スクレイパ（gofilelab年齢ゲート対応 / 早期打ち切り + 超軽量死活判定）
+# goxplorer.py — 汎用スクレイパ（gofilelab年齢ゲート対応 / lab専用高速ルート）
 # 目的:
 # - まず RAW_LIMIT 件だけ素早く収集（環境変数で調整可能、デフォルト100）
 # - 先頭 FILTER_LIMIT 件だけ超軽量フィルタ → 既出除外＆死活OKから want 本揃った時点で即返す
@@ -7,13 +7,11 @@
 #
 # 環境変数（任意）:
 #   BASE_ORIGIN         対象サイトのオリジン（例: https://gofilelab.com）
-#   BASE_LIST_URL       リストページURLテンプレ（例: https://gofilelab.com/newest?page={page}）
-#   PAGE1_URL           1ページ目のURL（例: https://gofilelab.com/newest?page=1）
+#   BASE_LIST_URL       リストページURLテンプレ（例: https://gofilelab.com/ja/newest?page={page}）
+#   PAGE1_URL           1ページ目のURL（例: https://gofilelab.com/ja/newest?page=1）
 #   RAW_LIMIT=100       収集時の上限
 #   FILTER_LIMIT=50     フィルタに回す最大件数
 #   SCRAPE_TIMEOUT_SEC  収集＋フィルタの締切秒（botから未指定時に参照）
-#
-# 依存は requirements.txt のまま。
 
 import os
 import re
@@ -29,8 +27,8 @@ from playwright.sync_api import sync_playwright
 
 # ====== 環境デフォルト ======
 ENV_BASE_ORIGIN   = os.getenv("BASE_ORIGIN", "https://gofilelab.com").rstrip("/")
-ENV_BASE_LIST_URL = os.getenv("BASE_LIST_URL", ENV_BASE_ORIGIN + "/newest?page={page}")
-ENV_PAGE1_URL     = os.getenv("PAGE1_URL", ENV_BASE_ORIGIN + "/newest?page=1")
+ENV_BASE_LIST_URL = os.getenv("BASE_LIST_URL", ENV_BASE_ORIGIN + "/ja/newest?page={page}")
+ENV_PAGE1_URL     = os.getenv("PAGE1_URL", ENV_BASE_ORIGIN + "/ja/newest?page=1")
 
 BASE_ORIGIN   = ENV_BASE_ORIGIN
 BASE_LIST_URL = ENV_BASE_LIST_URL
@@ -45,7 +43,6 @@ _LOC_RE   = re.compile(r"<loc>(.*?)</loc>", re.IGNORECASE | re.DOTALL)
 
 HEADERS = {
     "User-Agent": (
-        # 少し新しめのUAでCF対策
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
         "AppleWebKit/537.36 (KHTML, like Gecko) "
         "Chrome/129.0.0.0 Safari/537.36"
@@ -254,27 +251,25 @@ def _collect_via_wp_api(num_pages: int, deadline_ts: Optional[float]) -> List[st
         time.sleep(0.12)
     return all_urls[:RAW_LIMIT]
 
-# ====== Playwright（年齢ゲート突破 / エラー耐性強化 / 早期打ち切り） ======
+# ====== Playwright共通: 年齢ゲート回避 + ふるまい偽装 ======
 def _playwright_ctx(pw):
     browser = pw.chromium.launch(headless=True, args=[
         "--no-sandbox",
         "--disable-blink-features=AutomationControlled",
     ])
-    ctx = browser.new_context(user_agent=HEADERS["User-Agent"], locale="ja-JP")
+    ctx = browser.new_context(user_agent=HEADERS["User-Agent"], locale="ja-JP", viewport={"width": 1280, "height": 1800})
     ctx.add_init_script("""
         Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
         window.chrome = { runtime: {} };
         Object.defineProperty(navigator, 'plugins', { get: () => [1,2,3] });
         Object.defineProperty(navigator, 'languages', { get: () => ['ja-JP','ja'] });
         try {
-          // 年齢同意を初期化時に仕込む（描画前）
           localStorage.setItem('ageVerified','1');
           localStorage.setItem('adult','true');
           localStorage.setItem('age_verified','true');
           localStorage.setItem('age_verified_at', Date.now().toString());
         } catch(e){}
     """)
-    # Cookie は対象オリジンのドメインに対しても付与
     try:
         host = urlparse(BASE_ORIGIN).hostname or ""
         doms = set([host, "."+host if not host.startswith(".") else host])
@@ -286,11 +281,10 @@ def _playwright_ctx(pw):
             ])
     except Exception:
         pass
-    ctx.set_default_timeout(15000)
+    ctx.set_default_timeout(20000)
     return ctx
 
 def _bypass_age_gate(page):
-    # localStorage で念押し
     try:
         page.evaluate("""
           try{
@@ -309,7 +303,6 @@ def _bypass_age_gate(page):
         "label:has-text('18') >> input[type='checkbox']",
         "label:has-text('成人') >> input[type='checkbox']",
         "label:has-text('同意') >> input[type='checkbox']",
-        "text=18歳以上です >> xpath=..//input[@type='checkbox']",
         "xpath=//input[@type='checkbox']",
     ]
     button_sels = [
@@ -318,19 +311,16 @@ def _bypass_age_gate(page):
         "text=I Agree", "button:has-text('I Agree')",
         "text=Enter", "button:has-text('Enter')",
     ]
-
-    # チェック → ボタンの順に総当たり
     try:
         for sel in checkbox_sels:
             try:
                 el = page.locator(sel).first
                 if el and el.is_visible():
                     el.click(force=True, timeout=1000)
-                    page.wait_for_timeout(120)
+                    page.wait_for_timeout(100)
                     break
             except Exception:
                 continue
-
         for sel in button_sels:
             try:
                 btn = page.locator(sel).first
@@ -342,10 +332,8 @@ def _bypass_age_gate(page):
                 continue
     except Exception:
         pass
-
-    # 反映待ち
     try:
-        page.wait_for_load_state("networkidle", timeout=10000)
+        page.wait_for_load_state("networkidle", timeout=8000)
     except Exception:
         pass
 
@@ -359,11 +347,8 @@ def _get_html_pw(url: str, scroll_steps: int = 6, wait_ms: int = 600) -> str:
             "Referer": BASE_ORIGIN,
             "Connection": HEADERS["Connection"],
         })
-
-        # 直接ターゲットへ遷移 → 年齢同意突破
         page.goto(url, wait_until="domcontentloaded", timeout=22000)
         _bypass_age_gate(page)
-
         # まだゲートが残っていそうなら軽くリロード
         try:
             html_now = page.content() or ""
@@ -372,15 +357,12 @@ def _get_html_pw(url: str, scroll_steps: int = 6, wait_ms: int = 600) -> str:
                 _bypass_age_gate(page)
         except Exception:
             pass
-
-        # スクロールで遅延ロード要素を引っ張る
         for _ in range(scroll_steps):
             try:
-                page.mouse.wheel(0, 1500)
+                page.mouse.wheel(0, 1800)
             except Exception:
                 pass
             page.wait_for_timeout(wait_ms)
-
         html = ""
         try:
             html = page.content()
@@ -389,11 +371,62 @@ def _get_html_pw(url: str, scroll_steps: int = 6, wait_ms: int = 600) -> str:
         ctx.close()
         return html
 
+# ====== lab専用: 一覧ページから直に gofile リンクを大量回収 ======
+def _collect_lab_fast(num_pages: int, deadline_ts: Optional[float]) -> List[str]:
+    """
+    gofilelab専用。/ja/newest?page=N のカードにある「開く」(a[href*='gofile.io/d/']) を
+    Playwrightでスクロールしながら**その場で**収集。記事詳細には行かない。
+    """
+    all_urls, seen = [], set()
+    for p in range(1, num_pages + 1):
+        if _deadline_passed(deadline_ts):
+            print(f"[info] lab deadline at list page {p}; stop."); break
+
+        list_url = BASE_LIST_URL.format(page=p)
+        try:
+            # labは遅延ロード気味：ステップ多め/待機長め
+            lhtml = _get_html_pw(list_url, scroll_steps=8, wait_ms=700)
+        except Exception as e:
+            print(f"[warn] playwright list {p} failed: {e}")
+            lhtml = ""
+
+        if not lhtml:
+            print(f"[info] page {p}: found 0 gofile links (no html)")
+            continue
+
+        soup = BeautifulSoup(lhtml, "html.parser")
+        added = 0
+
+        # 1) まずは a[href*=gofile.io/d/] を直接回収（「開く」ボタン想定）
+        for a in soup.find_all("a", href=True):
+            href = a["href"].strip()
+            m = GOFILE_RE.search(href)
+            if m:
+                u = fix_scheme(m.group(0))
+                if u not in seen:
+                    seen.add(u); all_urls.append(u); added += 1
+                    if len(all_urls) >= RAW_LIMIT:
+                        print(f"[info] early stop: reached RAW_LIMIT={RAW_LIMIT} (total {len(all_urls)})")
+                        return all_urls[:RAW_LIMIT]
+
+        # 2) 念のため、生HTML内にある gofile 文字列も回収
+        for m in GOFILE_RE.findall(lhtml):
+            u = fix_scheme(m.strip())
+            if u and u not in seen:
+                seen.add(u); all_urls.append(u); added += 1
+                if len(all_urls) >= RAW_LIMIT:
+                    print(f"[info] early stop: reached RAW_LIMIT={RAW_LIMIT} (total {len(all_urls)})")
+                    return all_urls[:RAW_LIMIT]
+
+        print(f"[info] page {p}: extracted {added} urls from list face (total {len(all_urls)})")
+        time.sleep(0.12)
+
+    return all_urls[:RAW_LIMIT]
+
+# ====== 旧: 一般Playwright（nsnn/orevideoで利用） ======
 def _extract_article_links_from_list(html: str) -> List[str]:
     soup = BeautifulSoup(html or "", "html.parser")
     links, seen = [], set()
-
-    # 代表セレクタ（WordPress想定／他サイトでもそこそこヒット）
     for sel in ["article a", ".entry-title a", "a[rel='bookmark']"]:
         for a in soup.select(sel):
             href = a.get("href")
@@ -402,7 +435,6 @@ def _extract_article_links_from_list(html: str) -> List[str]:
             if url not in seen:
                 seen.add(url); links.append(url)
 
-    # セーフティ: 内部リンクでノイズ除外
     if len(links) < 12:
         base_host = urlparse(BASE_ORIGIN).hostname or ""
         for a in soup.find_all("a", href=True):
@@ -418,7 +450,6 @@ def _extract_article_links_from_list(html: str) -> List[str]:
             if url not in seen:
                 seen.add(url); links.append(url)
 
-    # nsnn の一覧では直接 redirect?url=... が並ぶケース → そのまま記事扱い
     if len(links) < 5:
         for a in soup.find_all("a", href=True):
             href = a["href"].strip()
@@ -446,7 +477,6 @@ def _collect_via_playwright(num_pages: int, deadline_ts: Optional[float]) -> Lis
         article_urls = _extract_article_links_from_list(lhtml) if lhtml else []
         print(f"[info] page {p}: found {len(article_urls)} article links")
 
-        # 詳細へ（早期に RAW_LIMIT 到達を狙う）
         added = 0
         for post_url in article_urls:
             if _deadline_passed(deadline_ts): break
@@ -459,7 +489,6 @@ def _collect_via_playwright(num_pages: int, deadline_ts: Optional[float]) -> Lis
                 print(f"[warn] playwright detail failed: {post_url} ({e})"); dhtml = ""
 
             urls = _extract_gofile_from_html(dhtml, s) if dhtml else []
-            # nsnn の redirect 自体からも抽出（HTMLが空でもURL中に含まれることがある）
             if not urls:
                 m = _resolve_to_gofile(post_url, s)
                 if m: urls = [m]
@@ -479,7 +508,11 @@ def _collect_via_playwright(num_pages: int, deadline_ts: Optional[float]) -> Lis
 
 # ====== エントリーポイント ======
 def fetch_listing_pages(num_pages: int = 100, deadline_ts: Optional[float] = None) -> List[str]:
-    # gofilelab など WPサイトはまず sitemap / wp-api を当て、ダメなら Playwright
+    # gofilelab は専用高速ルートで“一覧から直回収”
+    if "gofilelab.com" in (urlparse(BASE_ORIGIN).netloc or ""):
+        return _collect_lab_fast(num_pages=num_pages, deadline_ts=deadline_ts)
+
+    # それ以外は従来どおり：sitemap → wp-api → Playwright
     urls = _collect_via_sitemap(num_pages=num_pages, deadline_ts=deadline_ts)
     if urls: return urls[:RAW_LIMIT]
     urls = _collect_via_wp_api(num_pages=num_pages, deadline_ts=deadline_ts)
@@ -489,7 +522,6 @@ def fetch_listing_pages(num_pages: int = 100, deadline_ts: Optional[float] = Non
 def collect_fresh_gofile_urls(
     already_seen: Set[str], want: int = 3, num_pages: int = 100, deadline_sec: Optional[int] = None
 ) -> List[str]:
-    # bot側未指定なら環境変数 SCRAPE_TIMEOUT_SEC を採用
     if deadline_sec is None:
         _env = os.getenv("SCRAPE_TIMEOUT_SEC")
         try:
@@ -501,7 +533,6 @@ def collect_fresh_gofile_urls(
     deadline_ts = (_now() + deadline_sec) if deadline_sec else None
     raw = fetch_listing_pages(num_pages=num_pages, deadline_ts=deadline_ts)
 
-    # 先頭 FILTER_LIMIT 件だけ超軽量判定。want 到達で即返す。
     candidates = [u for u in raw if u not in already_seen][:max(1, FILTER_LIMIT)]
     uniq, seen_now = [], set()
 
@@ -512,5 +543,5 @@ def collect_fresh_gofile_urls(
         if is_gofile_alive(url):
             uniq.append(url); seen_now.add(url)
             if len(uniq) >= want:
-                break
-    return uniq
+                return uniq[:want]
+    return uniq[:want]
