@@ -1,4 +1,4 @@
-# goxplorer.py — monsnode + x.gd + Playwright 対応版（完全置き換え）
+# goxplorer.py — monsnode + x.gd 対応版（完全置き換え）
 
 import os, re, time
 from html import unescape
@@ -11,9 +11,9 @@ from bs4 import BeautifulSoup
 from playwright.sync_api import sync_playwright
 
 # ====== 環境 ======
-ENV_BASE_ORIGIN   = os.getenv("BASE_ORIGIN", "https://gofilelab.com").rstrip("/")
-ENV_BASE_LIST_URL = os.getenv("BASE_LIST_URL", ENV_BASE_ORIGIN + "/newest?page={page}")
-ENV_PAGE1_URL     = os.getenv("PAGE1_URL", ENV_BASE_ORIGIN + "/newest?page=1")
+ENV_BASE_ORIGIN   = os.getenv("BASE_ORIGIN", "https://monsnode.com").rstrip("/")
+ENV_BASE_LIST_URL = os.getenv("BASE_LIST_URL", ENV_BASE_ORIGIN + "/")
+ENV_PAGE1_URL     = os.getenv("PAGE1_URL", ENV_BASE_ORIGIN)
 
 BASE_ORIGIN   = ENV_BASE_ORIGIN
 BASE_LIST_URL = ENV_BASE_LIST_URL
@@ -23,7 +23,7 @@ WP_POSTS_API  = BASE_ORIGIN + "/wp-json/wp/v2/posts?page={page}&per_page=20&_fie
 SITEMAP_INDEX = BASE_ORIGIN + "/sitemap_index.xml"
 
 GOFILE_RE = re.compile(r"https?://gofile\.io/d/[A-Za-z0-9]+", re.I)
-MP4_RE    = re.compile(r'https?://[^\s"\'>]+\.mp4\b', re.I)
+MP4_RE    = re.compile(r"https?://[^\s\"'>]+\.mp4\b", re.I)
 _LOC_RE   = re.compile(r"<loc>(.*?)</loc>", re.IGNORECASE | re.DOTALL)
 
 HEADERS = {
@@ -38,23 +38,28 @@ HEADERS = {
 RAW_LIMIT    = int(os.getenv("RAW_LIMIT", "100"))
 FILTER_LIMIT = int(os.getenv("FILTER_LIMIT", "50"))
 
-# ====== 共通ユーティリティ ======
 def _build_scraper():
     proxies = {}
     http_p = os.getenv("HTTP_PROXY") or os.getenv("http_proxy")
     https_p = os.getenv("HTTPS_PROXY") or os.getenv("https_proxy")
-    if http_p:  proxies["http"]  = http_p
-    if https_p: proxies["https"] = https_p
+    if http_p:
+        proxies["http"]  = http_p
+    if https_p:
+        proxies["https"] = https_p
 
     s = cloudscraper.create_scraper(browser={"browser": "chrome", "platform": "windows", "mobile": False})
-    if proxies: s.proxies.update(proxies)
+    if proxies:
+        s.proxies.update(proxies)
     s.headers.update(HEADERS)
 
+    # age gate cookie（無害）
     try:
         host = urlparse(BASE_ORIGIN).hostname or ""
         roots = {host}
-        if host and not host.startswith("."): roots.add("." + host)
-        if host.count(".") >= 1: roots.add("." + ".".join(host.split(".")[-2:]))
+        if host and not host.startswith("."):
+            roots.add("." + host)
+        if host.count(".") >= 1:
+            roots.add("." + ".".join(host.split(".")[-2:]))
         for dom in roots:
             s.cookies.set("ageVerified", "1", domain=dom, path="/")
             s.cookies.set("adult", "true",     domain=dom, path="/")
@@ -63,24 +68,25 @@ def _build_scraper():
     return s
 
 def fix_scheme(url: str) -> str:
-    if url.startswith("htps://"): return "https://" + url[len("htps://"):]
-    if url.startswith("http://gofile.io/"):
+    if url.startswith("htps://"):
+        return "https://" + url[len("htps://"):]
+    if url.startswith("http://gofile.io/"):  # 旧 gofile 用
         return "https://" + url[len("http://"):]
     return url
 
-def _now() -> float: return time.monotonic()
+def _now() -> float:
+    return time.monotonic()
 
 def _deadline_passed(deadline_ts: Optional[float]) -> bool:
     return deadline_ts is not None and _now() >= deadline_ts
 
-# ====== gofile 死活（monsnode では使わない） ======
+# ====== 死活（旧 gofile 用） ======
 _DEATH_MARKERS = (
     "This content does not exist",
     "The content you are looking for could not be found",
     "has been automatically removed",
     "has been deleted by the owner",
 )
-
 def is_gofile_alive(url: str) -> bool:
     url = fix_scheme(url)
     s = _build_scraper()
@@ -93,13 +99,15 @@ def is_gofile_alive(url: str) -> bool:
             data = (getattr(r, "text", "") or "")[:1536]
         tl = (data or "").lower()
         for dm in _DEATH_MARKERS:
-            if dm.lower() in tl: return False
+            if dm.lower() in tl:
+                return False
         return True
     except Exception:
-        return True
+        return True  # 断定不可は通す
 
 # ====== x.gd 短縮 ======
 def shorten_via_xgd(long_url: str) -> str:
+    """x.gd の API を使って URL を短縮する。失敗時は元 URL をそのまま返す。"""
     api_key = os.getenv("XGD_API_KEY", "").strip()
     if not api_key:
         return long_url
@@ -117,24 +125,29 @@ def shorten_via_xgd(long_url: str) -> str:
         print(f"[warn] x.gd shorten failed for {long_url}: {e}")
         return long_url
 
-# ====== gofile 抽出ユーティリティ（互換用） ======
+# ====== 汎用 gofile 抽出（旧サイト用に残す） ======
 def _resolve_to_gofile(url: str, scraper, timeout: int = 4) -> Optional[str]:
-    if not url: return None
+    if not url:
+        return None
     url = fix_scheme(url)
     try:
-        pr = urlparse(url); qs = parse_qs(pr.query or "")
+        pr = urlparse(url)
+        qs = parse_qs(pr.query or "")
         for k in ("url","u","target","to"):
             if k in qs and qs[k]:
-                cand = unquote(qs[k][0]); m = GOFILE_RE.search(cand)
-                if m: return fix_scheme(m.group(0))
+                cand = unquote(qs[k][0])
+                m = GOFILE_RE.search(cand)
+                if m:
+                    return fix_scheme(m.group(0))
     except Exception:
         pass
-    try:
+    try:  # 3xx の Location
         r = scraper.get(url, timeout=timeout, allow_redirects=False)
         loc = r.headers.get("Location") or r.headers.get("location")
         if isinstance(loc, str):
             m = GOFILE_RE.search(loc)
-            if m: return fix_scheme(m.group(0))
+            if m:
+                return fix_scheme(m.group(0))
     except Exception:
         pass
     m = GOFILE_RE.search(url)
@@ -149,91 +162,97 @@ def _extract_gofile_from_html(html: str, scraper) -> List[str]:
             m = GOFILE_RE.search(href)
             go = fix_scheme(m.group(0)) if m else _resolve_to_gofile(href, scraper)
             if go and go not in seen:
-                seen.add(go); urls.append(go)
+                seen.add(go)
+                urls.append(go)
         for attr in ("data-url","data-clipboard-text","data-href"):
             v = (a.get(attr) or "").strip()
-            if not v: continue
+            if not v:
+                continue
             m2 = GOFILE_RE.search(v)
             if m2:
                 go2 = fix_scheme(m2.group(0))
                 if go2 and go2 not in seen:
-                    seen.add(go2); urls.append(go2)
+                    seen.add(go2)
+                    urls.append(go2)
     for m in GOFILE_RE.findall(html or ""):
         u = fix_scheme(m.strip())
         if u and u not in seen:
-            seen.add(u); urls.append(u)
+            seen.add(u)
+            urls.append(u)
     return urls
 
-def _extract_mp4_urls_from_html(html: str) -> List[str]:
-    if not html:
-        return []
-    urls, seen = [], set()
-    soup = BeautifulSoup(html, "html.parser")
-    for tag_name, attr in [("a","href"),("video","src"),("source","src")]:
-        for tag in soup.find_all(tag_name):
-            href = (tag.get(attr) or "").strip()
-            if not href: continue
-            m = MP4_RE.search(href)
-            if m:
-                u = m.group(0)
-                if u not in seen:
-                    seen.add(u); urls.append(u)
-    for m in MP4_RE.findall(html):
-        u = m.strip()
-        if u not in seen:
-            seen.add(u); urls.append(u)
-    return urls
-
-# ====== sitemap / wp-api（一般サイト向け） ======
+# ====== sitemap / wp-api（旧 gofile 系） ======
 def _extract_locs_from_xml(xml_text: str) -> List[str]:
-    if not xml_text: return []
-    raw = _LOC_RE.findall(xml_text); locs = []
+    if not xml_text:
+        return []
+    raw = _LOC_RE.findall(xml_text)
+    locs = []
     for x in raw:
         u = unescape(x).replace("\n","").replace("\r","").replace("\t","").strip()
-        if u: locs.append(u)
+        if u:
+            locs.append(u)
     return locs
 
 def _fetch_sitemap_post_urls(scraper, max_pages: int, deadline_ts: Optional[float]) -> List[str]:
     urls = []
     def _get(url: str, timeout: int = 8):
         try:
-            r = scraper.get(url, timeout=timeout); r.raise_for_status(); return r.text
+            r = scraper.get(url, timeout=timeout)
+            r.raise_for_status()
+            return r.text
         except Exception:
             return None
     xml = _get(SITEMAP_INDEX) or _get(BASE_ORIGIN + "/sitemap.xml")
     if not xml:
+        print("[warn] sitemap not available")
         return urls
     locs = _extract_locs_from_xml(xml)
     if not locs:
+        print("[warn] sitemap had no <loc>")
         return urls
+
     post_sitemaps = [u for u in locs if "post" in u or "news" in u or "posts" in u] or locs
     cap = max_pages * 20
     for sm in post_sitemaps:
-        if _deadline_passed(deadline_ts): break
+        if _deadline_passed(deadline_ts):
+            print("[info] sitemap deadline reached; stop.")
+            break
         xml2 = _get(sm)
-        if not xml2: continue
+        if not xml2:
+            continue
         for u in _extract_locs_from_xml(xml2):
             if u.startswith(BASE_ORIGIN):
                 urls.append(u)
-                if len(urls) >= cap: break
-        if len(urls) >= cap: break
+                if len(urls) >= cap:
+                    break
+        if len(urls) >= cap:
+            break
+    print(f"[info] sitemap collected {len(urls)} post urls")
     return urls
 
 def _collect_via_sitemap(num_pages: int, deadline_ts: Optional[float]) -> List[str]:
     s = _build_scraper()
     posts = _fetch_sitemap_post_urls(s, max_pages=num_pages, deadline_ts=deadline_ts)
-    if not posts: return []
+    if not posts:
+        return []
     all_urls, seen = [], set()
     for i, post_url in enumerate(posts, 1):
-        if _deadline_passed(deadline_ts): break
+        if _deadline_passed(deadline_ts):
+            print(f"[info] sitemap deadline at post {i}; stop.")
+            break
         try:
-            r = s.get(post_url, timeout=8); r.raise_for_status(); html = r.text
-        except Exception:
+            r = s.get(post_url, timeout=8)
+            r.raise_for_status()
+            html = r.text
+        except Exception as e:
+            print(f"[warn] sitemap detail fetch failed: {post_url} ({e})")
             continue
         for u in _extract_gofile_from_html(html, s):
             if u not in seen:
-                seen.add(u); all_urls.append(u)
-        if len(all_urls) >= RAW_LIMIT: return all_urls[:RAW_LIMIT]
+                seen.add(u)
+                all_urls.append(u)
+        if len(all_urls) >= RAW_LIMIT:
+            return all_urls[:RAW_LIMIT]
         time.sleep(0.06)
     return all_urls[:RAW_LIMIT]
 
@@ -241,21 +260,28 @@ def _collect_via_wp_api(num_pages: int, deadline_ts: Optional[float]) -> List[st
     s = _build_scraper()
     all_urls, seen = [], set()
     for p in range(1, num_pages + 1):
-        if _deadline_passed(deadline_ts): break
+        if _deadline_passed(deadline_ts):
+            print(f"[info] wp-api deadline at page {p}; stop.")
+            break
         api = WP_POSTS_API.format(page=p)
         try:
             r = s.get(api, timeout=8)
-            if "json" not in (r.headers.get("Content-Type", "")): break
+            if "json" not in (r.headers.get("Content-Type","")):
+                raise ValueError("non-json returned")
             arr = r.json()
-        except Exception:
+        except Exception as e:
+            print(f"[warn] wp-api page {p} failed: {e}")
             break
-        if not isinstance(arr, list) or not arr: break
+        if not isinstance(arr, list) or not arr:
+            break
         for item in arr:
             html = (item.get("content", {}) or {}).get("rendered", "") if isinstance(item, dict) else ""
             for u in _extract_gofile_from_html(html, s):
                 if u not in seen:
-                    seen.add(u); all_urls.append(u)
-        if len(all_urls) >= RAW_LIMIT: return all_urls[:RAW_LIMIT]
+                    seen.add(u)
+                    all_urls.append(u)
+        if len(all_urls) >= RAW_LIMIT:
+            return all_urls[:RAW_LIMIT]
         time.sleep(0.08)
     return all_urls[:RAW_LIMIT]
 
@@ -268,159 +294,76 @@ def _playwright_ctx(pw):
     ctx = browser.new_context(
         user_agent=HEADERS["User-Agent"],
         locale="ja-JP",
-        viewport={"width": 1360, "height": 2400},
+        viewport={"width": 1360, "height": 2400}
     )
     ctx.add_init_script("""
         Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
         window.chrome = { runtime: {} };
         Object.defineProperty(navigator, 'plugins', { get: () => [1,2,3] });
         Object.defineProperty(navigator, 'languages', { get: () => ['ja-JP','ja'] });
+        try{
+          localStorage.setItem('ageVerified','1');
+          localStorage.setItem('adult','true');
+          localStorage.setItem('age_verified','true');
+          localStorage.setItem('age_verified_at', Date.now().toString());
+        }catch(e){}
     """)
+    try:
+        host = urlparse(BASE_ORIGIN).hostname or ""
+        doms = {host}
+        if host and not host.startswith("."):
+            doms.add("." + host)
+        for dom in doms:
+            if dom:
+                ctx.add_cookies([
+                    {"name":"ageVerified","value":"1","domain":dom,"path":"/"},
+                    {"name":"adult","value":"true","domain":dom,"path":"/"},
+                ])
+    except Exception:
+        pass
     ctx.set_default_timeout(22000)
     return ctx
 
-def _bypass_age_gate(page):
-    try:
-        page.evaluate("""
-          try{
-            localStorage.setItem('ageVerified','1');
-            localStorage.setItem('adult','true');
-            localStorage.setItem('age_verified','true');
-            localStorage.setItem('age_verified_at', Date.now().toString());
-          }catch(e){}
-        """)
-    except Exception:
-        pass
-    page.wait_for_timeout(120)
-
-# ====== gofilelab Playwright（互換用） ======
-def _collect_lab_fast(num_pages: int, deadline_ts: Optional[float]) -> List[str]:
-    all_urls, seen_gofile, seen_posts = [], set(), set()
-    with sync_playwright() as pw:
-        ctx = _playwright_ctx(pw)
-        page = ctx.new_page()
-        base_host = urlparse(BASE_ORIGIN).hostname or ""
-        for p in range(1, num_pages + 1):
-            if _deadline_passed(deadline_ts): break
-            list_url = BASE_LIST_URL.format(page=p)
-            try:
-                page.goto(list_url, wait_until="domcontentloaded", timeout=20000)
-            except Exception:
-                continue
-            _bypass_age_gate(page)
-            prev_h = 0
-            for _ in range(16):
-                try: page.mouse.wheel(0, 1800)
-                except Exception: pass
-                page.wait_for_timeout(200)
-                try:
-                    h = page.evaluate("() => document.body.scrollHeight") or 0
-                    if h == prev_h: break
-                    prev_h = h
-                except Exception:
-                    break
-            try:
-                hrefs = page.evaluate("""
-                  () => {
-                    const set = new Set();
-                    document.querySelectorAll('a[href*="gofile.io/d/"]').forEach(a => a.href && set.add(a.href));
-                    document.querySelectorAll('[data-url],[data-href],[data-clipboard-text]').forEach(el=>{
-                      ['data-url','data-href','data-clipboard-text'].forEach(k=>{
-                        const v = el.getAttribute(k); if(v) set.add(v);
-                      });
-                    });
-                    return Array.from(set);
-                  }
-                """) or []
-            except Exception:
-                hrefs = []
-            for raw in hrefs:
-                m = GOFILE_RE.search(raw or "")
-                if not m: continue
-                u = fix_scheme(m.group(0))
-                if u not in seen_gofile:
-                    seen_gofile.add(u); all_urls.append(u)
-                    if len(all_urls) >= RAW_LIMIT:
-                        ctx.close(); return all_urls[:RAW_LIMIT]
-            anchors = page.evaluate("""
-              () => Array.from(document.querySelectorAll('a[href]'))
-                          .map(a => a.getAttribute('href'))
-                          .filter(Boolean)
-            """) or []
-            article_links = set()
-            for href in anchors:
-                href = href.strip()
-                if href.startswith("#"): continue
-                url = urljoin(BASE_ORIGIN, href)
-                pr = urlparse(url)
-                if base_host and pr.netloc and (base_host not in pr.netloc):
-                    continue
-                bad = ("/newest", "/category/", "/tag/", "/page/", "/search", "/author", "/feed", "/privacy", "/contact")
-                if any(x in pr.path for x in bad):
-                    continue
-                if pr.path.endswith((".jpg",".png",".gif",".webp",".svg",".css",".js",".zip",".rar",".pdf",".xml")):
-                    continue
-                if "gofile.io/d/" in url:
-                    continue
-                article_links.add(url)
-            for post_url in list(article_links)[:60]:
-                if _deadline_passed(deadline_ts): break
-                if post_url in seen_posts: continue
-                seen_posts.add(post_url)
-                try:
-                    page.goto(post_url, wait_until="domcontentloaded", timeout=20000)
-                except Exception:
-                    continue
-                _bypass_age_gate(page)
-                for _ in range(6):
-                    try: page.mouse.wheel(0, 1500)
-                    except Exception: pass
-                    page.wait_for_timeout(180)
-                try:
-                    dhtml = page.content() or ""
-                except Exception:
-                    dhtml = ""
-                if dhtml:
-                    for u in _extract_gofile_from_html(dhtml, _build_scraper()):
-                        if u not in seen_gofile:
-                            seen_gofile.add(u); all_urls.append(u)
-                            if len(all_urls) >= RAW_LIMIT:
-                                ctx.close(); return all_urls[:RAW_LIMIT]
-                time.sleep(0.05)
-        ctx.close()
-    return all_urls[:RAW_LIMIT]
-
-# ====== 一般 Playwright（互換用） ======
+# ====== 一般 Playwright ルート（旧 gofile 用に残す） ======
 def _extract_article_links_from_list(html: str) -> List[str]:
     soup = BeautifulSoup(html or "", "html.parser")
     links, seen = [], set()
     for sel in ["article a", ".entry-title a", "a[rel='bookmark']"]:
         for a in soup.select(sel):
             href = a.get("href")
-            if not href: continue
+            if not href:
+                continue
             url = urljoin(BASE_ORIGIN, href.strip())
             if url not in seen:
-                seen.add(url); links.append(url)
+                seen.add(url)
+                links.append(url)
+
     if len(links) < 12:
         base_host = urlparse(BASE_ORIGIN).hostname or ""
         for a in soup.find_all("a", href=True):
             href = a["href"].strip()
-            if not href or href.startswith("#"): continue
+            if not href or href.startswith("#"):
+                continue
             url = urljoin(BASE_ORIGIN, href)
             pr = urlparse(url)
-            if pr.netloc and base_host and (base_host not in pr.netloc): continue
+            if pr.netloc and base_host and (base_host not in pr.netloc):
+                continue
             bad = ("/newest","/category/","/tag/","/page/","/search","/author","/feed","/privacy","/contact")
-            if any(x in pr.path for x in bad): continue
-            if pr.path.endswith((".jpg",".png",".gif",".webp",".svg",".css",".js",".zip",".rar",".pdf",".xml")): continue
+            if any(x in pr.path for x in bad):
+                continue
+            if pr.path.endswith((".jpg",".png",".gif",".webp",".svg",".css",".js",".zip",".rar",".pdf",".xml")):
+                continue
             if url not in seen:
-                seen.add(url); links.append(url)
+                seen.add(url)
+                links.append(url)
     if len(links) < 5:
         for a in soup.find_all("a", href=True):
             href = a["href"].strip()
             if "redirect?url=" in href:
                 url = urljoin(BASE_ORIGIN, href)
                 if url not in seen:
-                    seen.add(url); links.append(url)
+                    seen.add(url)
+                    links.append(url)
     return links[:50]
 
 def _collect_via_playwright(num_pages: int, deadline_ts: Optional[float]) -> List[str]:
@@ -429,46 +372,79 @@ def _collect_via_playwright(num_pages: int, deadline_ts: Optional[float]) -> Lis
     with sync_playwright() as pw:
         ctx = _playwright_ctx(pw)
         page = ctx.new_page()
+        page.set_extra_http_headers({
+            "Accept": HEADERS["Accept"],
+            "Accept-Language": HEADERS["Accept-Language"],
+            "Referer": BASE_ORIGIN,
+            "Connection": HEADERS["Connection"],
+        })
+
         for p in range(1, num_pages + 1):
-            if _deadline_passed(deadline_ts): break
+            if _deadline_passed(deadline_ts):
+                print(f"[info] pw deadline at list page {p}; stop.")
+                break
             list_url = BASE_LIST_URL.format(page=p)
             try:
                 page.goto(list_url, wait_until="domcontentloaded", timeout=20000)
-            except Exception:
+            except Exception as e:
+                print(f"[warn] playwright list {p} failed: {e}")
                 continue
+
             for _ in range(6):
-                try: page.mouse.wheel(0, 1600)
-                except Exception: pass
+                try:
+                    page.mouse.wheel(0, 1600)
+                except Exception:
+                    pass
                 page.wait_for_timeout(200)
+
             lhtml = page.content()
             article_urls = _extract_article_links_from_list(lhtml) if lhtml else []
+            print(f"[info] page {p}: found {len(article_urls)} article links")
+
+            added = 0
             for post_url in article_urls:
-                if _deadline_passed(deadline_ts): break
-                if post_url in seen_posts: continue
+                if _deadline_passed(deadline_ts):
+                    break
+                if post_url in seen_posts:
+                    continue
                 seen_posts.add(post_url)
+
                 try:
                     page.goto(post_url, wait_until="domcontentloaded", timeout=20000)
-                except Exception:
+                except Exception as e:
+                    print(f"[warn] playwright detail failed: {post_url} ({e})")
                     continue
+
                 for _ in range(2):
-                    try: page.mouse.wheel(0, 1500)
-                    except Exception: pass
+                    try:
+                        page.mouse.wheel(0, 1500)
+                    except Exception:
+                        pass
                     page.wait_for_timeout(180)
                 dhtml = page.content() or ""
+
                 urls = _extract_gofile_from_html(dhtml, s) if dhtml else []
                 if not urls:
                     m = _resolve_to_gofile(post_url, s)
-                    if m: urls = [m]
+                    if m:
+                        urls = [m]
+
                 for u in urls:
                     if u not in seen_urls:
-                        seen_urls.add(u); all_urls.append(u)
+                        seen_urls.add(u)
+                        all_urls.append(u)
+                        added += 1
                         if len(all_urls) >= RAW_LIMIT:
-                            ctx.close(); return all_urls[:RAW_LIMIT]
+                            print(f"[info] early stop: reached RAW_LIMIT={RAW_LIMIT} (total {len(all_urls)})")
+                            ctx.close()
+                            return all_urls[:RAW_LIMIT]
                 time.sleep(0.06)
+
+            print(f"[info] page {p}: extracted {added} new urls (total {len(all_urls)})")
         ctx.close()
     return all_urls[:RAW_LIMIT]
 
-# ====== monsnode 用検索URL ======
+# ====== monsnode 検索URL ======
 def _monsnode_search_urls() -> List[str]:
     env = os.getenv("MONSNODE_SEARCH_URLS", "").strip()
     if env:
@@ -476,6 +452,7 @@ def _monsnode_search_urls() -> List[str]:
         urls = [p.strip() for p in parts if p.strip()]
         if urls:
             return urls
+
     return [
         "https://monsnode.com/search.php?search=992ultra",
         "https://monsnode.com/search.php?search=verycoolav",
@@ -484,141 +461,159 @@ def _monsnode_search_urls() -> List[str]:
         "https://monsnode.com/search.php?search=himitukessya0",
     ]
 
-# ====== monsnode 専用：Playwright で .mp4 抜く ======
+# ====== monsnode 専用：Playwright で .mp4 ネットワークURLを取得 ======
 def _collect_monsnode_mp4(num_pages: int, deadline_ts: Optional[float]) -> List[str]:
     all_urls: List[str] = []
     seen_mp4: Set[str] = set()
+    seen_detail: Set[str] = set()
+
     search_bases = _monsnode_search_urls()
+
     with sync_playwright() as pw:
         ctx = _playwright_ctx(pw)
         page = ctx.new_page()
+        page.set_extra_http_headers({
+            "Accept": HEADERS["Accept"],
+            "Accept-Language": HEADERS["Accept-Language"],
+            "Referer": BASE_ORIGIN,
+            "Connection": HEADERS["Connection"],
+        })
+
+        def on_request(request):
+            url = request.url
+            if ".mp4" in url:
+                if url not in seen_mp4:
+                    seen_mp4.add(url)
+                    all_urls.append(url)
+                    print(f"[info] caught mp4: {url}")
+        page.on("request", on_request)
+
         for base in search_bases:
             for p in range(0, num_pages):
                 if _deadline_passed(deadline_ts):
+                    print(f"[info] monsnode deadline at page {p}; stop.")
                     ctx.close()
                     return all_urls[:RAW_LIMIT]
+
                 if p == 0:
-                    url = base
+                    search_url = base
                 else:
                     sep = "&" if "?" in base else "?"
-                    url = f"{base}{sep}page={p}&s="
+                    search_url = f"{base}{sep}page={p}&s="
+
                 try:
-                    page.goto(url, wait_until="domcontentloaded", timeout=20000)
+                    page.goto(search_url, wait_until="domcontentloaded", timeout=20000)
                 except Exception as e:
-                    print(f"[warn] monsnode fetch failed: {url} ({e})")
+                    print(f"[warn] monsnode list goto failed: {search_url} ({e})")
                     break
-                _bypass_age_gate(page)
-                prev_h = 0
-                for _ in range(10):
-                    try: page.mouse.wheel(0, 1600)
-                    except Exception: pass
-                    page.wait_for_timeout(200)
-                    try:
-                        h = page.evaluate("() => document.body.scrollHeight") or 0
-                        if h == prev_h: break
-                        prev_h = h
-                    except Exception:
-                        break
+
+                page.wait_for_timeout(1200)
+
                 try:
-                    mp4s = page.evaluate("""
-                      () => {
-                        const out = new Set();
-                        document.querySelectorAll('a[href], video[src], source[src]').forEach(el => {
-                          const href = el.href || el.src || el.getAttribute('href') || el.getAttribute('src') || '';
-                          if (!href) return;
-                          if (href.includes('.mp4')) out.add(href);
-                        });
-                        return Array.from(out);
-                      }
+                    detail_links = page.evaluate("""
+                        () => Array.from(document.querySelectorAll('a[href*="/v"]'))
+                                   .map(a => a.href)
                     """) or []
                 except Exception:
-                    mp4s = []
-                added = 0
-                for u in mp4s:
-                    m = MP4_RE.search(u)
-                    if not m:
+                    detail_links = []
+
+                print(f"[info] monsnode list {search_url}: found {len(detail_links)} detail links")
+
+                for durl in detail_links:
+                    if _deadline_passed(deadline_ts):
+                        break
+                    if durl in seen_detail:
                         continue
-                    mp4 = m.group(0)
-                    if mp4 not in seen_mp4:
-                        seen_mp4.add(mp4); all_urls.append(mp4); added += 1
-                        if len(all_urls) >= RAW_LIMIT:
-                            print(f"[info] monsnode early stop at RAW_LIMIT={RAW_LIMIT}")
-                            ctx.close()
-                            return all_urls[:RAW_LIMIT]
-                print(f"[info] monsnode {url}: +{added} (total {len(all_urls)})")
-                time.sleep(0.1)
+                    seen_detail.add(durl)
+
+                    try:
+                        page.goto(durl, wait_until="domcontentloaded", timeout=20000)
+                    except Exception as e:
+                        print(f"[warn] monsnode detail goto failed: {durl} ({e})")
+                        continue
+
+                    # 自動再生が走らない場合に備えて Watch ボタンを押してみる
+                    try:
+                        page.click("text=Watch", timeout=2000)
+                    except Exception:
+                        pass
+
+                    page.wait_for_timeout(4000)
+
+                    if len(all_urls) >= RAW_LIMIT:
+                        print(f"[info] monsnode early stop at RAW_LIMIT={RAW_LIMIT}")
+                        ctx.close()
+                        return all_urls[:RAW_LIMIT]
+
         ctx.close()
     return all_urls[:RAW_LIMIT]
 
 # ====== 収集エントリ ======
 def fetch_listing_pages(num_pages: int = 100, deadline_ts: Optional[float] = None) -> List[str]:
     host = urlparse(BASE_ORIGIN).hostname or ""
+
     if "monsnode.com" in (host or ""):
         return _collect_monsnode_mp4(num_pages=num_pages, deadline_ts=deadline_ts)
-    if "gofilelab.com" in (host or ""):
-        return _collect_lab_fast(num_pages=num_pages, deadline_ts=deadline_ts)
+
+    # 旧 gofile 系（nsnn/orevideo など）が必要なとき用
     urls = _collect_via_sitemap(num_pages=num_pages, deadline_ts=deadline_ts)
-    if urls: return urls[:RAW_LIMIT]
+    if urls:
+        return urls[:RAW_LIMIT]
     urls = _collect_via_wp_api(num_pages=num_pages, deadline_ts=deadline_ts)
-    if urls: return urls[:RAW_LIMIT]
+    if urls:
+        return urls[:RAW_LIMIT]
     return _collect_via_playwright(num_pages=num_pages, deadline_ts=deadline_ts)
 
-# ====== 最終：bot.py から呼ばれる部分 ======
+# ====== フィルタ・返却 ======
 def collect_fresh_gofile_urls(
     already_seen: Set[str], want: int = 3, num_pages: int = 100, deadline_sec: Optional[int] = None
 ) -> List[str]:
-    """
-    - monsnode の場合: .mp4 URL を集めて x.gd で短縮した URL を返す
-    - state.json に保存されている「短縮後URL」は二度と使わない
-    """
     if deadline_sec is None:
         _env = os.getenv("SCRAPE_TIMEOUT_SEC")
         try:
-            if _env: deadline_sec = int(_env)
+            if _env:
+                deadline_sec = int(_env)
         except Exception:
             deadline_sec = None
     deadline_ts = (_now() + deadline_sec) if deadline_sec else None
 
     raw = fetch_listing_pages(num_pages=num_pages, deadline_ts=deadline_ts)
-    candidates = raw[:max(1, FILTER_LIMIT)]
 
     host = urlparse(BASE_ORIGIN).hostname or ""
     is_monsnode = "monsnode.com" in (host or "")
 
-    results: List[str] = []
-    seen_raw: Set[str] = set()
-    seen_short: Set[str] = set()
+    uniq_raw: List[str] = []
+    uniq_short: List[str] = []
+    seen_now: Set[str] = set()
 
-    for url in candidates:
+    for url in raw:
         if _deadline_passed(deadline_ts):
             print("[info] deadline reached during filtering; stop.")
             break
-        if url in seen_raw:
-            continue
-        seen_raw.add(url)
-
-        # 念のため、生URLが state にあったらスキップ
-        if url in already_seen:
+        if url in seen_now:
             continue
 
-        alive = True
-        if not is_monsnode:
-            alive = is_gofile_alive(url)
-        if not alive:
-            continue
+        if is_monsnode:
+            # monsnode: .mp4 をそのまま使用し、短縮URL重複を抑止
+            short = shorten_via_xgd(url)
+            if short in already_seen:
+                continue
+            seen_now.add(url)
+            uniq_raw.append(url)
+            uniq_short.append(short)
+            if len(uniq_short) >= want:
+                break
+        else:
+            # 旧 gofile: 元のロジック（死活チェック + raw URL のまま）を維持
+            if url in already_seen:
+                continue
+            if not is_gofile_alive(url):
+                continue
+            seen_now.add(url)
+            uniq_raw.append(url)
+            uniq_short.append(url)
+            if len(uniq_short) >= want:
+                break
 
-        # ここで短縮し、短縮後 URL で重複チェック
-        short = shorten_via_xgd(url)
-
-        if short in already_seen:
-            continue
-        if short in seen_short:
-            continue
-
-        seen_short.add(short)
-        results.append(short)
-
-        if len(results) >= want:
-            break
-
-    return results[:want]
+    # monsnode の場合は短縮したURLを返す。旧 gofile の場合は元URLを返す。
+    return uniq_short[:want]
