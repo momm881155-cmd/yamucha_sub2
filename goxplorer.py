@@ -1,4 +1,4 @@
-# goxplorer.py — monsnode redirect 専用版（bot.py 互換 / mp4 には潜らない）
+# goxplorer.py — tktube 用: data-preview の mp4 を集めて x.gd で短縮して返す版
 
 import os
 import re
@@ -8,13 +8,13 @@ from urllib.parse import urljoin
 
 import requests
 from bs4 import BeautifulSoup
-from playwright.sync_api import sync_playwright
 
 # =========================
 #   基本設定
 # =========================
 
-BASE_ORIGIN = os.getenv("BASE_ORIGIN", "https://monsnode.com").rstrip("/")
+# tktube のベースURL（必要なら env で上書き可能）
+BASE_ORIGIN = os.getenv("BASE_ORIGIN", "https://tktube.com").rstrip("/")
 
 HEADERS = {
     "User-Agent": (
@@ -28,38 +28,48 @@ HEADERS = {
     "Connection": "keep-alive",
 }
 
-RAW_LIMIT    = int(os.getenv("RAW_LIMIT", "100"))   # 1回の最大生URL数
-FILTER_LIMIT = int(os.getenv("FILTER_LIMIT", "50"))  # フィルタ後の上限
-
-
-def _monsnode_search_words() -> List[str]:
-    """
-    検索ワード一覧（環境変数 MONSNODE_SEARCH_TERMS で上書き可）
-    例: MONSNODE_SEARCH_TERMS="992ultra,verycoolav,bestav8,movieszzzz,himitukessya0"
-    """
-    env = os.getenv("MONSNODE_SEARCH_TERMS", "").strip()
-    if env:
-        parts = re.split(r"[,\n]+", env)
-        words = [p.strip() for p in parts if p.strip()]
-        if words:
-            return words
-
-    # デフォルト 5つ
-    return [
-        "992ultra",
-        "verycoolav",
-        "bestav8",
-        "movieszzzz",
-        "himitukessya0",
-    ]
-
+RAW_LIMIT    = int(os.getenv("RAW_LIMIT", "100"))
+FILTER_LIMIT = int(os.getenv("FILTER_LIMIT", "50"))
 
 def _now() -> float:
     return time.monotonic()
 
-
 def _deadline_passed(deadline_ts: Optional[float]) -> bool:
     return deadline_ts is not None and _now() >= deadline_ts
+
+def _normalize_url(u: str) -> str:
+    if not u:
+        return u
+    u = u.strip()
+    u = re.sub(r"^http://", "https://", u, flags=re.I)
+    return u.rstrip("/")
+
+
+# =========================
+#   スクレイピング対象URLリスト
+# =========================
+#   ★ここを少しいじれば、他カテゴリにも流用できます。
+
+def _listing_urls() -> List[str]:
+    """
+    収集対象の一覧ページURLを返す。
+
+    - 環境変数 TKTUBE_CATEGORY_URLS があればそちらを優先
+      （カンマ or 改行区切りで複数指定可）
+      例:
+        TKTUBE_CATEGORY_URLS="https://tktube.com/ja/categories/fc2/?page={page}"
+    """
+    env = os.getenv("TKTUBE_CATEGORY_URLS", "").strip()
+    if env:
+        parts = re.split(r"[,\n]+", env)
+        urls = [p.strip() for p in parts if p.strip()]
+        if urls:
+            return urls
+
+    # デフォルト: ご提示の fc2 カテゴリ（?page={page} は後で format される）
+    return [
+        f"{BASE_ORIGIN}/ja/categories/fc2/?page={{page}}",
+    ]
 
 
 # =========================
@@ -68,8 +78,8 @@ def _deadline_passed(deadline_ts: Optional[float]) -> bool:
 
 def shorten_via_xgd(long_url: str) -> str:
     """
-    x.gd の API を使って URL を短縮する。
-    失敗時は元URLのまま返す。
+    x.gd の API で URL を短縮。
+    失敗したら元 URL をそのまま返す。
     """
     api_key = os.getenv("XGD_API_KEY", "").strip()
     if not api_key:
@@ -79,7 +89,7 @@ def shorten_via_xgd(long_url: str) -> str:
         r = requests.get(
             "https://xgd.io/V1/shorten",
             params={"url": long_url, "key": api_key},
-            headers={"User-Agent": HEADERS["User-Agent"]},
+            headers=HEADERS,
             timeout=10,
         )
         r.raise_for_status()
@@ -94,170 +104,109 @@ def shorten_via_xgd(long_url: str) -> str:
 
 
 # =========================
-#   Playwright（HTML取得専用）
+#   一覧ページ → data-preview の mp4 抽出
 # =========================
 
-def _playwright_ctx(pw):
-    browser = pw.chromium.launch(
-        headless=True,
-        args=[
-            "--no-sandbox",
-            "--disable-blink-features=AutomationControlled",
-        ],
-    )
-    ctx = browser.new_context(
-        user_agent=HEADERS["User-Agent"],
-        locale="ja-JP",
-        viewport={"width": 1360, "height": 2400},
-    )
-    ctx.add_init_script("""
-        Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
-        window.chrome = { runtime: {} };
-        Object.defineProperty(navigator, 'plugins', { get: () => [1,2,3] });
-        Object.defineProperty(navigator, 'languages', { get: () => ['ja-JP','ja'] });
-    """)
-    return ctx
-
-
-def fetch_html_with_playwright(url: str, timeout_ms: int = 20000) -> Optional[str]:
+def extract_preview_mp4_from_listing(html: str) -> List[str]:
     """
-    monsnode は requests だけだと 403 になりやすいので、
-    Playwright で HTML を取得してから解析する。
-    """
-    try:
-        with sync_playwright() as pw:
-            ctx = _playwright_ctx(pw)
-            page = ctx.new_page()
-            page.set_extra_http_headers({
-                "Accept": HEADERS["Accept"],
-                "Accept-Language": HEADERS["Accept-Language"],
-                "Referer": HEADERS["Referer"],
-                "Connection": HEADERS["Connection"],
-            })
+    一覧ページの HTML から data-preview="...mp4" を全部抜き出す。
 
-            page.goto(url, wait_until="domcontentloaded", timeout=timeout_ms)
-
-            # jscroll の遅延ロード対策で軽くスクロール
-            try:
-                for _ in range(4):
-                    page.mouse.wheel(0, 1400)
-                    page.wait_for_timeout(200)
-            except Exception:
-                pass
-
-            html = page.content()
-            ctx.close()
-            return html
-    except Exception as e:
-        print(f"[warn] fetch_html_with_playwright failed: {url} ({e})")
-        return None
-
-
-# =========================
-#   一覧ページ → redirect.php 抽出（正規表現でゴリっと）
-# =========================
-
-# href=".../redirect.php?v=123456" を全部拾う
-REDIRECT_HREF_RE = re.compile(
-    r'href=[\'"](?P<href>(?:https?://monsnode\.com)?/redirect\.php\?v=\d+)[\'"]',
-    re.IGNORECASE,
-)
-
-
-def extract_redirect_links_from_list(html: str) -> List[str]:
-    """
-    検索結果ページの生HTMLから redirect.php?v=... のリンクを全部抜く。
-    BeautifulSoup に頼らず正規表現で判定する。
+    例: 
+      <img src="...jpg"
+           data-preview="https://pv.tkcdns.com/.../357384_preview.mp4"
+           ...>
     """
     if not html:
         return []
 
-    links: List[str] = []
+    soup = BeautifulSoup(html, "html.parser")
+    urls: List[str] = []
     seen: Set[str] = set()
 
-    for m in REDIRECT_HREF_RE.finditer(html):
-        href = m.group("href").strip()
-        full = urljoin(BASE_ORIGIN, href)
+    # data-preview 属性を持つ全タグを対象にする
+    for tag in soup.find_all(attrs={"data-preview": True}):
+        pv = (tag.get("data-preview") or "").strip()
+        if not pv:
+            continue
+
+        # 絶対URL / 相対URL 両対応
+        full = pv if pv.startswith("http") else urljoin(BASE_ORIGIN, pv)
+        full = _normalize_url(full)
+
         if full not in seen:
             seen.add(full)
-            links.append(full)
+            urls.append(full)
 
-    # デバッグ用
-    print(f"[debug] extract_redirect_links_from_list: {len(links)} links")
-    if not links:
-        print(f"[debug] html length={len(html)} / maybe Cloudflare or no results page")
-
-    return links
+    print(f"[debug] extract_preview_mp4_from_listing: {len(urls)} urls")
+    return urls
 
 
-def _collect_redirect_urls_from_search_pages(
-    num_pages: int,
-    deadline_ts: Optional[float],
-) -> List[str]:
+def _collect_preview_urls(num_pages: int, deadline_ts: Optional[float]) -> List[str]:
     """
-    monsnode の search.php?search=WORD (&page=N) を直接叩いて、
-    redirect.php?v=... のURLを集める。
+    - _listing_urls() でカテゴリ一覧URLを取得
+    - 各ページから data-preview の mp4 を回収
     """
     all_urls: List[str] = []
     seen: Set[str] = set()
+    listing_bases = _listing_urls()
 
-    search_words = _monsnode_search_words()
-
-    for word in search_words:
-        for page in range(1, num_pages + 1):
+    for base_url in listing_bases:
+        for p in range(1, num_pages + 1):
             if _deadline_passed(deadline_ts):
-                print(f"[info] monsnode deadline at search={word}, page={page}; stop.")
+                print(f"[info] deadline at base={base_url}, page={p}; stop.")
                 return all_urls[:RAW_LIMIT]
 
-            if page == 1:
-                list_url = f"{BASE_ORIGIN}/search.php?search={word}"
+            # ページング
+            if "{page}" in base_url:
+                list_url = base_url.format(page=p)
             else:
-                list_url = f"{BASE_ORIGIN}/search.php?search={word}&page={page}&s="
+                # ?page がないURLなら1ページ目だけ
+                if p > 1:
+                    break
+                list_url = base_url
 
-            html = fetch_html_with_playwright(list_url)
-            if not html:
-                print(f"[warn] monsnode fetch failed: {list_url}")
+            try:
+                resp = requests.get(list_url, headers=HEADERS, timeout=20)
+                resp.raise_for_status()
+            except Exception as e:
+                print(f"[warn] listing requests failed: {list_url} ({e})")
                 continue
 
-            redirect_links = extract_redirect_links_from_list(html)
-            print(f"[info] monsnode list {list_url}: found {len(redirect_links)} redirect links")
+            html = resp.text
+            previews = extract_preview_mp4_from_listing(html)
+            print(f"[info] list {list_url}: found {len(previews)} preview mp4")
 
-            for u in redirect_links:
+            for u in previews:
                 if u in seen:
                     continue
                 seen.add(u)
                 all_urls.append(u)
                 if len(all_urls) >= RAW_LIMIT:
-                    print(f"[info] monsnode early stop at RAW_LIMIT={RAW_LIMIT}")
+                    print(f"[info] early stop at RAW_LIMIT={RAW_LIMIT}")
                     return all_urls[:RAW_LIMIT]
 
-            time.sleep(0.1)
+            time.sleep(0.2)
 
     return all_urls[:RAW_LIMIT]
 
 
 # =========================
-#   fetch_listing_pages (bot.py 互換)
+#   fetch_listing_pages（bot.py 互換）
 # =========================
 
 def fetch_listing_pages(
     num_pages: int = 100,
-    deadline_ts: Optional[float] = None,
+    deadline_ts: Optional[float] = None
 ) -> List[str]:
     """
-    旧 goxplorer 互換インターフェイス。
-    monsnode 専用。
-    - 各 search ワードの search.php?search=WORD (&page=2,3) を開く
-    - redirect.php?v=XXXX をまとめて返す
+    旧 goxplorer と同じインターフェイス。
+    ここでは「data-preview の mp4 URL の生リスト」を返す。
     """
-    return _collect_redirect_urls_from_search_pages(
-        num_pages=num_pages,
-        deadline_ts=deadline_ts,
-    )
+    return _collect_preview_urls(num_pages=num_pages, deadline_ts=deadline_ts)
 
 
 # =========================
-#   collect_fresh_gofile_urls (bot.py から呼ばれるメイン)
+#   collect_fresh_gofile_urls（bot.py から呼ばれる）
 # =========================
 
 def collect_fresh_gofile_urls(
@@ -267,13 +216,11 @@ def collect_fresh_gofile_urls(
     deadline_sec: Optional[int] = None,
 ) -> List[str]:
     """
-    bot.py から呼び出されるメイン関数。
-    ここでは「gofile」ではなく monsnode redirect URL を扱う。
-
-    - monsnode から redirect.php?v=XXXX の URL を集める
-    - state.json 由来の already_seen でフィルタ
+    - data-preview の mp4 URL を集める
+    - state.json 由来の already_seen で重複を除外
+      （元URL・短縮URL 両方をチェック）
     - x.gd で短縮
-    - want 件だけ返却
+    - want 件だけ返す
     """
 
     if deadline_sec is None:
@@ -286,11 +233,11 @@ def collect_fresh_gofile_urls(
 
     deadline_ts = (_now() + deadline_sec) if deadline_sec else None
 
-    # 生の redirect URL 一覧
+    # 生の mp4 URL 一覧
     raw_urls = fetch_listing_pages(num_pages=num_pages, deadline_ts=deadline_ts)
 
-    # 既出除外（元URLが state.json にあればスキップ）
-    candidates = [u for u in raw_urls if u not in already_seen][:max(1, FILTER_LIMIT)]
+    # 多すぎると時間がかかるので上限
+    candidates = raw_urls[: max(1, FILTER_LIMIT)]
 
     results: List[str] = []
     seen_now: Set[str] = set()
@@ -299,16 +246,26 @@ def collect_fresh_gofile_urls(
         if _deadline_passed(deadline_ts):
             print("[info] deadline reached during filtering; stop.")
             break
-        if url in seen_now:
+
+        norm_url = _normalize_url(url)
+
+        # 同一 run 内の重複
+        if norm_url in seen_now:
             continue
 
+        # 元URL がすでに state.json にある場合はスキップ
+        if norm_url in already_seen:
+            continue
+
+        # x.gd で短縮
         short = shorten_via_xgd(url)
+        norm_short = _normalize_url(short)
 
-        # 短縮後URLも state.json にあったらスキップ
-        if short in already_seen:
+        # 短縮後 URL が state.json にある場合もスキップ
+        if norm_short in already_seen:
             continue
 
-        seen_now.add(url)
+        seen_now.add(norm_url)
         results.append(short)
 
         if len(results) >= want:
