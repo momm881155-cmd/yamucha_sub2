@@ -32,42 +32,40 @@ jobs:
           python-version: "3.11"
           cache: "pip"
 
-      - name: Install deps & Playwright
+      - name: Install deps
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
-          python -m playwright install --with-deps chromium
 
-      # === monsnode 専用 ===
-      - name: Run bot (monsnode)
-        id: monsnode
+      # === tktube 専用 ===
+      - name: Run bot (tktube)
+        id: tktube
         timeout-minutes: 10
         env:
-          # monsnode 側
-          BASE_ORIGIN: "https://monsnode.com"
+          # tktube 側
+          BASE_ORIGIN: "https://tktube.com"
 
-          # 検索ワードを追加・変更したければここ（or MONSNODE_SEARCH_TERMS でカンマ区切り）
-          # 例）"992ultra,verycoolav,bestav8,movieszzzz,himitukessya0"
-          # MONSNODE_SEARCH_TERMS: "992ultra,verycoolav,bestav8,movieszzzz,himitukessya0"
+          # 収集対象の一覧ページ
+          # 複数カテゴリ回したければ改行で増やす:
+          # TKTUBE_CATEGORY_URLS: |
+          #   https://tktube.com/ja/categories/fc2/?page={page}
+          #   https://tktube.com/ja/categories/xxx/?page={page}
+          TKTUBE_CATEGORY_URLS: "https://tktube.com/ja/categories/fc2/?page={page}"
 
-          # redirect.php を何件ずつまとめて処理するか（goXplorer の REDIRECT_BATCH）
-          # デフォルト 10 のままで良ければコメントアウトでOK
-          # REDIRECT_BATCH: 10
+          # 収集関連
+          SCRAPE_TIMEOUT_SEC: 240
+          RAW_LIMIT: 100
+          FILTER_LIMIT: 50
+          NUM_PAGES: 3   # page=1〜3 まで回す
 
-          # 収集関連（redirect 経由で時間がかかるのでタイムアウトは長めに）
-          SCRAPE_TIMEOUT_SEC: 600    # ★ 240 → 600 に変更
-          RAW_LIMIT: 40              # 今回の goxplorer では実質未使用だが、互換のため残し
-          FILTER_LIMIT: 18           # 同上
-          NUM_PAGES: 3               # 各 search ワードについて page=1〜3 まで回す
-
-          # 投稿ロジック（bot.py そのまま利用）
+          # 投稿ロジック（bot.py）
           WANT_POST: 5
           MIN_POST: 3
           USE_API_TIMELINE: 0
           WAIT_ON_RATE_LIMIT: 0
           HARD_LIMIT_SEC: 600
 
-          # X(Twitter) API keys（ツイートするなら必須）
+          # X(Twitter) API keys
           X_API_KEY: ${{ secrets.X_API_KEY }}
           X_API_SECRET: ${{ secrets.X_API_SECRET }}
           X_ACCESS_TOKEN: ${{ secrets.X_ACCESS_TOKEN }}
@@ -82,8 +80,8 @@ jobs:
           HTTPS_PROXY: ${{ secrets.HTTPS_PROXY }}
         run: |
           set -e
-          python bot.py | tee bot_monsnode.log
-          if grep -q "tweeted id=" bot_monsnode.log; then
+          python bot.py | tee bot_tktube.log
+          if grep -q "tweeted id=" bot_tktube.log; then
             echo "posted=true" >> "$GITHUB_OUTPUT"
           else
             echo "posted=false" >> "$GITHUB_OUTPUT"
