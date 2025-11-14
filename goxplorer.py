@@ -127,7 +127,10 @@ def _playwright_ctx(pw):
 
 
 def fetch_html_with_playwright(url: str, timeout_ms: int = 20000) -> Optional[str]:
-    """monsnode は requests だと 403 になるので Playwright で取得。"""
+    """
+    monsnode は requests だと 403 になりやすいので Playwright で取得。
+    一覧ページの場合は .listn や redirect リンクが出てくるまで軽く待機する。
+    """
     try:
         with sync_playwright() as pw:
             ctx = _playwright_ctx(pw)
@@ -141,10 +144,20 @@ def fetch_html_with_playwright(url: str, timeout_ms: int = 20000) -> Optional[st
 
             page.goto(url, wait_until="domcontentloaded", timeout=timeout_ms)
 
-            # 軽くスクロールして遅延ロードを促す
+            # 一覧ページの場合、サムネ一覧が DOM に乗るまで少し待つ
             try:
-                for _ in range(4):
-                    page.mouse.wheel(0, 1400)
+                page.wait_for_selector(
+                    ".listn a[href], a[href*='redirect.php?v='], a[href^='/v']",
+                    timeout=8000
+                )
+            except Exception:
+                # 詳細ページなどではこのセレクタが無い可能性もあるので無視
+                pass
+
+            # 遅延ロード対策でスクロール
+            try:
+                for _ in range(6):
+                    page.mouse.wheel(0, 1600)
                     page.wait_for_timeout(200)
             except Exception:
                 pass
@@ -168,8 +181,6 @@ def extract_detail_links_from_list(html: str) -> List[str]:
     例:
       - https://monsnode.com/v1951182235140274713
       - https://monsnode.com/redirect.php?v=20892092
-
-    どちらも、クリックの先で mp4 が見つかる可能性があるので対象にする。
     """
     if not html:
         return []
@@ -198,6 +209,8 @@ def extract_detail_links_from_list(html: str) -> List[str]:
                 seen.add(full)
                 links.append(full)
 
+    # デバッグ用に軽く件数を出す
+    print(f"[debug] extract_detail_links_from_list: {len(links)} links")
     return links
 
 
