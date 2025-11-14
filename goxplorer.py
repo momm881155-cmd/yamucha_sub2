@@ -14,7 +14,6 @@ from playwright.sync_api import sync_playwright
 #   設定
 # =========================
 
-# monsnode のベースURL
 BASE_ORIGIN = os.getenv("BASE_ORIGIN", "https://monsnode.com").rstrip("/")
 
 HEADERS = {
@@ -25,30 +24,33 @@ HEADERS = {
     ),
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
     "Accept-Language": "ja-JP,ja;q=0.9,en-US;q=0.8,en;q=0.7",
-    "Referer": "https://monsnode.com",
+    "Referer": BASE_ORIGIN,
     "Connection": "keep-alive",
 }
 
-# 1回の収集での最大生URL件数・フィルタ後上限
 RAW_LIMIT    = int(os.getenv("RAW_LIMIT", "100"))
 FILTER_LIMIT = int(os.getenv("FILTER_LIMIT", "50"))
 
-# monsnode 検索ワード（環境変数で増減も可能）
-def _monsnode_search_words() -> List[str]:
-    env = os.getenv("MONSNODE_SEARCH_TERMS", "").strip()
+# ▼▼▼ ここで「先ほどの URL」をベースとして使う ▼▼▼
+def _monsnode_search_urls() -> List[str]:
+    """
+    検索スタートとなる search.php の URL 群。
+    環境変数 MONSNODE_SEARCH_URLS で上書きも可能。
+    """
+    env = os.getenv("MONSNODE_SEARCH_URLS", "").strip()
     if env:
         parts = re.split(r"[,\n]+", env)
-        words = [p.strip() for p in parts if p.strip()]
-        if words:
-            return words
+        urls = [p.strip() for p in parts if p.strip()]
+        if urls:
+            return urls
 
-    # デフォルト（ご指定の5つ）
+    # デフォルト：あなたが指定した 5 本
     return [
-        "992ultra",
-        "verycoolav",
-        "bestav8",
-        "movieszzzz",
-        "himitukessya0",
+        "https://monsnode.com/search.php?search=992ultra",
+        "https://monsnode.com/search.php?search=verycoolav",
+        "https://monsnode.com/search.php?search=bestav8",
+        "https://monsnode.com/search.php?search=movieszzzz",
+        "https://monsnode.com/search.php?search=himitukessya0",
     ]
 
 
@@ -81,7 +83,6 @@ def shorten_via_xgd(long_url: str) -> str:
         return long_url
 
     try:
-        # ドキュメントに合わせて create.php or V1/shorten などAPI仕様に応じて変更
         r = requests.get(
             "https://xgd.io/V1/shorten",
             params={"url": long_url, "key": api_key},
@@ -126,9 +127,7 @@ def _playwright_ctx(pw):
 
 
 def fetch_html_with_playwright(url: str, timeout_ms: int = 20000) -> Optional[str]:
-    """
-    monsnode は requests だと 403 が出るので、Playwright で HTML を取得。
-    """
+    """monsnode は requests だと 403 になるので Playwright で取得。"""
     try:
         with sync_playwright() as pw:
             ctx = _playwright_ctx(pw)
@@ -173,7 +172,7 @@ def extract_detail_links_from_list(html: str) -> List[str]:
     links: List[str] = []
     seen: Set[str] = set()
 
-    # href に "/v" を含む a タグをすべて拾う（以前は ^/v[0-9]+$ にしていて取りこぼしの可能性あり）
+    # href に "/v" を含む a タグを全部拾う（/v数字... の詳細ページ）
     for a in soup.find_all("a", href=True):
         href = a["href"].strip()
         if "/v" not in href:
@@ -191,9 +190,7 @@ def extract_detail_links_from_list(html: str) -> List[str]:
 # =========================
 
 def extract_mp4_urls_from_detail(url: str) -> List[str]:
-    """
-    動画詳細ページ（/v....）から video.twimg.com の .mp4 を抽出。
-    """
+    """動画詳細ページ（/v....）から video.twimg.com の .mp4 を抽出。"""
     html = fetch_html_with_playwright(url)
     if not html:
         return []
@@ -216,27 +213,28 @@ def extract_mp4_urls_from_detail(url: str) -> List[str]:
 
 def _collect_monsnode_urls(num_pages: int, deadline_ts: Optional[float]) -> List[str]:
     """
-    monsnode の search 結果から、
-    - /v... 形式の動画ページURLを取得
-    - そこから mp4 を抜き出し
-    元の mp4 URLを返す（短縮は別フェーズ）。
+    monsnode の search 結果から:
+      - /v... 形式の動画ページURLを取得
+      - そこから mp4 を抜き出し
+    生の mp4 URL を返す（短縮は別フェーズ）。
     """
     all_mp4: List[str] = []
     seen_mp4: Set[str] = set()
 
-    search_words = _monsnode_search_words()
+    search_urls = _monsnode_search_urls()
 
-    for word in search_words:
+    for base in search_urls:
         for page in range(1, num_pages + 1):
             if _deadline_passed(deadline_ts):
-                print(f"[info] monsnode deadline at search={word}, page={page}; stop.")
+                print(f"[info] monsnode deadline at base={base}, page={page}; stop.")
                 return all_mp4[:RAW_LIMIT]
 
-            # 1ページ目と2ページ目以降でURLが違う仕様に対応
+            # 1ページ目と2ページ目以降で URL 形式が違うパターンに対応
             if page == 1:
-                list_url = f"{BASE_ORIGIN}/search.php?search={word}"
+                list_url = base
             else:
-                list_url = f"{BASE_ORIGIN}/search.php?search={word}&page={page}&s="
+                sep = "&" if "?" in base else "?"
+                list_url = f"{base}{sep}page={page}&s="
 
             html = fetch_html_with_playwright(list_url)
             if not html:
@@ -251,15 +249,19 @@ def _collect_monsnode_urls(num_pages: int, deadline_ts: Optional[float]) -> List
                     print("[info] monsnode deadline during detail; stop.")
                     return all_mp4[:RAW_LIMIT]
 
-                # 各 /v... ページから mp4 抽出
                 mp4s = extract_mp4_urls_from_detail(durl)
+                added = 0
                 for m in mp4s:
                     if m not in seen_mp4:
                         seen_mp4.add(m)
                         all_mp4.append(m)
+                        added += 1
                         if len(all_mp4) >= RAW_LIMIT:
                             print(f"[info] monsnode early stop at RAW_LIMIT={RAW_LIMIT}")
                             return all_mp4[:RAW_LIMIT]
+
+                if added:
+                    print(f"[info] detail {durl}: +{added} mp4 (total {len(all_mp4)})")
 
             time.sleep(0.1)
 
@@ -274,10 +276,7 @@ def fetch_listing_pages(
     num_pages: int = 100,
     deadline_ts: Optional[float] = None
 ) -> List[str]:
-    """
-    旧 goxplorer にあったインターフェイス互換。
-    monsnode 専用で mp4 URL リストを返す。
-    """
+    """旧 goxplorer と同じ名前で、monsnode 専用 mp4 URL リストを返す。"""
     return _collect_monsnode_urls(num_pages=num_pages, deadline_ts=deadline_ts)
 
 
@@ -309,10 +308,8 @@ def collect_fresh_gofile_urls(
 
     deadline_ts = (_now() + deadline_sec) if deadline_sec else None
 
-    # 生の mp4 URL 一覧
     raw_mp4 = fetch_listing_pages(num_pages=num_pages, deadline_ts=deadline_ts)
 
-    # 既出除外（元URL & 短縮URL どちらでもヒットしたらスキップしたいので、まずは元URLで見る）
     candidates = [u for u in raw_mp4 if u not in already_seen][:max(1, FILTER_LIMIT)]
 
     results: List[str] = []
@@ -331,6 +328,7 @@ def collect_fresh_gofile_urls(
         if short in already_seen:
             continue
 
+        # ここから下に「日本語の素の行」は絶対に入れない！
         seen_now.add(url)
         results.append(short)
 
