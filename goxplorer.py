@@ -1,4 +1,8 @@
-# goxplorer.py — monsnode 専用 + x.gd 短縮（bot.py 互換・deadline 無し版）
+# goxplorer.py — monsnode 専用 + x.gd 短縮（bot.py 互換）
+# ・monsnode の search.php から redirect.php を拾う
+# ・redirect.php をブラウザで開いて video.twimg.com の .mp4 を抜く
+# ・mp4 が "want" 本集まったら即終了（80件全部見に行かない）
+# ・短縮は x.gd、重複判定は state.json (already_seen) に任せる
 
 import os
 import re
@@ -28,14 +32,14 @@ HEADERS = {
     "Connection": "keep-alive",
 }
 
+# 収集上限（環境変数で変えられるが、実際には "want" 本で早めに切る）
 RAW_LIMIT    = int(os.getenv("RAW_LIMIT", "100"))
 FILTER_LIMIT = int(os.getenv("FILTER_LIMIT", "50"))
 
-
 def _monsnode_search_words() -> List[str]:
     """
-    検索ワードを返す。
-    環境変数 MONSNODE_SEARCH_TERMS があればそれを優先（カンマ or 改行区切り）。
+    検索ワード一覧。
+    MONSNODE_SEARCH_TERMS に "a,b,c" 形式で指定があればそれを優先。
     """
     env = os.getenv("MONSNODE_SEARCH_TERMS", "").strip()
     if env:
@@ -59,10 +63,6 @@ MP4_RE = re.compile(
     r"https://video\.twimg\.com/[^\s\"']*?\.mp4[^\s\"']*",
     re.I,
 )
-
-
-def _now() -> float:
-    return time.monotonic()
 
 
 # =========================
@@ -159,8 +159,8 @@ def extract_redirect_links_from_list(html: str) -> List[str]:
 def resolve_redirect_to_mp4(page, redirect_url: str, max_attempts: int = 3) -> List[str]:
     """
     redirect.php?v=... をブラウザで開いて、
-    - 1回目は広告に飛ばされる可能性が高いので、複数回トライ
-    - 最終URL、ページHTML の両方から video.twimg.com の .mp4 を探す
+    - 1回目は広告サイトに飛ばされることがある前提で複数回トライ
+    - 最終URL or HTML から video.twimg.com の .mp4 を探す
     """
     collected: List[str] = []
     seen: Set[str] = set()
@@ -172,7 +172,7 @@ def resolve_redirect_to_mp4(page, redirect_url: str, max_attempts: int = 3) -> L
             print(f"[warn] redirect playwright goto failed (try={attempt}): {redirect_url} ({e})")
             continue
 
-        # 軽く待つ（広告のリダイレクトなど）
+        # 軽く待ってから、可能なら networkidle まで待つ
         try:
             page.wait_for_timeout(800)
             try:
@@ -202,25 +202,32 @@ def resolve_redirect_to_mp4(page, redirect_url: str, max_attempts: int = 3) -> L
                     seen.add(u)
                     collected.append(u)
 
+        # この redirect で mp4 を見つけたら、これ以上このURLは追わない
         if collected:
-            break  # この redirect はもうOK
+            break
 
     return collected
 
 
 # =========================
-#   monsnode 専用収集（deadline なし）
+#   monsnode 専用収集
 # =========================
 
-def _collect_monsnode_mp4(num_pages: int) -> List[str]:
+def _collect_monsnode_mp4(num_pages: int, want: int) -> List[str]:
     """
     monsnode の search 結果から mp4 URL を収集。
-    - search.php?search=WORD (&page=2&s= など) を開く
-    - redirect.php?v=... を一覧から全取得
-    - 各 redirect.php から video.twimg.com の mp4 を抜く
+    - search.php?search=WORD (&page=2&s=...) を開く
+    - redirect.php?v=... を一覧から取得
+    - 各 redirect.php から video.twimg.com の .mp4 を抜く
+    - mp4 が "target" 本集まったら即終了
     """
     all_mp4: List[str] = []
     seen_mp4: Set[str] = set()
+
+    # 重複などで何本か落ちる可能性があるので、少し余裕を持たせる
+    target = max(want * 3, want)   # 例: want=5 → 15本集まったらやめる
+    if target > RAW_LIMIT:
+        target = RAW_LIMIT
 
     search_words = _monsnode_search_words()
 
@@ -236,11 +243,10 @@ def _collect_monsnode_mp4(num_pages: int) -> List[str]:
 
         for word in search_words:
             for p in range(1, num_pages + 1):
-                # RAW_LIMIT に達したら全体終了
-                if len(all_mp4) >= RAW_LIMIT:
-                    print(f"[info] monsnode early stop at RAW_LIMIT={RAW_LIMIT}")
+                if len(all_mp4) >= target:
+                    print(f"[info] monsnode early stop: reached target={target}")
                     ctx.close()
-                    return all_mp4[:RAW_LIMIT]
+                    return all_mp4[:target]
 
                 # 1ページ目と2ページ目以降でURL構造が違う
                 if p == 1:
@@ -270,28 +276,28 @@ def _collect_monsnode_mp4(num_pages: int) -> List[str]:
                 redirect_links = extract_redirect_links_from_list(html)
                 print(f"[info] monsnode list {list_url}: found {len(redirect_links)} redirect links")
 
-                # 各 redirect から mp4 を抜く
+                # redirect.php を順に開いて mp4 抜く
                 for rurl in redirect_links:
-                    if len(all_mp4) >= RAW_LIMIT:
-                        print(f"[info] monsnode early stop at RAW_LIMIT={RAW_LIMIT}")
+                    if len(all_mp4) >= target:
+                        print(f"[info] monsnode early stop inside redirect loop: target={target}")
                         ctx.close()
-                        return all_mp4[:RAW_LIMIT]
+                        return all_mp4[:target]
 
                     mp4s = resolve_redirect_to_mp4(page, rurl, max_attempts=3)
                     for m in mp4s:
                         if m not in seen_mp4:
                             seen_mp4.add(m)
                             all_mp4.append(m)
-                            if len(all_mp4) >= RAW_LIMIT:
-                                print(f"[info] monsnode early stop at RAW_LIMIT={RAW_LIMIT}")
+                            if len(all_mp4) >= target:
+                                print(f"[info] monsnode early stop at target={target}")
                                 ctx.close()
-                                return all_mp4[:RAW_LIMIT]
+                                return all_mp4[:target]
 
                 time.sleep(0.1)
 
         ctx.close()
 
-    return all_mp4[:RAW_LIMIT]
+    return all_mp4[:target]
 
 
 # =========================
@@ -300,14 +306,16 @@ def _collect_monsnode_mp4(num_pages: int) -> List[str]:
 
 def fetch_listing_pages(
     num_pages: int = 100,
-    deadline_ts: Optional[float] = None,  # 互換のため引数だけ残すが使わない
+    deadline_ts: Optional[float] = None,  # 互換のため残すが使わない
 ) -> List[str]:
     """
-    旧 goxplorer のインターフェイス互換。
-    monsnode 専用で mp4 URL リストを返す。
+    旧 goxplorer のインターフェイス用。
+    monsnode 専用では collect_fresh_gofile_urls から直接 _collect_monsnode_mp4 を呼ぶので、
+    ここは他で使いたい場合のための簡易ラッパ。
     """
-    _ = deadline_ts  # unused
-    return _collect_monsnode_mp4(num_pages=num_pages)
+    _ = deadline_ts
+    # デフォルト want=10 としておく（外から直接呼ばれた場合用）
+    return _collect_monsnode_mp4(num_pages=num_pages, want=10)
 
 
 # =========================
@@ -321,18 +329,17 @@ def collect_fresh_gofile_urls(
     deadline_sec: Optional[int] = None,
 ) -> List[str]:
     """
-    bot.py から呼び出されるメイン関数（インターフェイスはそのまま）。
-    - monsnode から mp4 URL を集める
+    bot.py から呼び出されるメイン関数。
+    - monsnode から mp4 URL を集める（"want" 本×少し余裕ぶん）
     - state.json 由来の already_seen でフィルタ
     - x.gd で短縮
     - WANT_POST 件だけ返却
     """
 
-    # deadline は互換のため受け取るが、monsnode では使わない
-    _ = deadline_sec  # unused
+    _ = deadline_sec  # monsnode では内部の deadline は使わない
 
-    # 生 mp4 URL 一覧
-    raw_mp4 = fetch_listing_pages(num_pages=num_pages, deadline_ts=None)
+    # 生 mp4 URL（重複除去前）
+    raw_mp4 = _collect_monsnode_mp4(num_pages=num_pages, want=want)
 
     # 既出除外（元URLベース）
     candidates = [u for u in raw_mp4 if u not in already_seen][:max(1, FILTER_LIMIT)]
