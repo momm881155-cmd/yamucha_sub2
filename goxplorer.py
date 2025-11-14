@@ -1,8 +1,4 @@
-# goxplorer.py — monsnode 専用 + x.gd 短縮（bot.py 互換）
-# ・monsnode の search.php から redirect.php を拾う
-# ・redirect.php をブラウザで開いて video.twimg.com の .mp4 を抜く
-# ・mp4 が "want" 本集まったら即終了（80件全部見に行かない）
-# ・短縮は x.gd、重複判定は state.json (already_seen) に任せる
+# goxplorer.py — monsnode 専用 + x.gd 短縮（bot.py 互換・mp4 5本で即切り上げ）
 
 import os
 import re
@@ -32,15 +28,11 @@ HEADERS = {
     "Connection": "keep-alive",
 }
 
-# 収集上限（環境変数で変えられるが、実際には "want" 本で早めに切る）
 RAW_LIMIT    = int(os.getenv("RAW_LIMIT", "100"))
 FILTER_LIMIT = int(os.getenv("FILTER_LIMIT", "50"))
 
+# 検索ワード（環境変数 MONSNODE_SEARCH_TERMS で上書き可能）
 def _monsnode_search_words() -> List[str]:
-    """
-    検索ワード一覧。
-    MONSNODE_SEARCH_TERMS に "a,b,c" 形式で指定があればそれを優先。
-    """
     env = os.getenv("MONSNODE_SEARCH_TERMS", "").strip()
     if env:
         parts = re.split(r"[,\n]+", env)
@@ -48,7 +40,7 @@ def _monsnode_search_words() -> List[str]:
         if words:
             return words
 
-    # デフォルト（ご指定の5つ）
+    # デフォルト 5 本
     return [
         "992ultra",
         "verycoolav",
@@ -58,7 +50,7 @@ def _monsnode_search_words() -> List[str]:
     ]
 
 
-# video.twimg.com の .mp4
+# video.twimg.com の mp4 検出用（保険で使う）
 MP4_RE = re.compile(
     r"https://video\.twimg\.com/[^\s\"']*?\.mp4[^\s\"']*",
     re.I,
@@ -156,54 +148,93 @@ def extract_redirect_links_from_list(html: str) -> List[str]:
 #   redirect.php → mp4 抽出
 # =========================
 
-def resolve_redirect_to_mp4(page, redirect_url: str, max_attempts: int = 3) -> List[str]:
+def extract_mp4_from_html(html: str) -> List[str]:
     """
-    redirect.php?v=... をブラウザで開いて、
-    - 1回目は広告サイトに飛ばされることがある前提で複数回トライ
-    - 最終URL or HTML から video.twimg.com の .mp4 を探す
+    redirect.php の HTML から video.twimg.com の .mp4 URL を抜き出す。
+    aタグの href と、保険で生のテキストも見る。
+    """
+    if not html:
+        return []
+
+    found: List[str] = []
+    seen: Set[str] = set()
+
+    soup = BeautifulSoup(html, "html.parser")
+
+    # 1) aタグの href から探す（あなたが貼ってくれたパターン）
+    for a in soup.find_all("a", href=True):
+        href = a["href"].strip()
+        if "video.twimg.com" in href and ".mp4" in href:
+            u = href
+            if u not in seen:
+                seen.add(u)
+                found.append(u)
+
+    # 2) 念のため HTML 全体からも正規表現で拾う（保険）
+    if "video.twimg.com" in html:
+        for m in MP4_RE.findall(html):
+            u = m.strip()
+            if u and u not in seen:
+                seen.add(u)
+                found.append(u)
+
+    return found
+
+
+def resolve_redirect_to_mp4(ctx, redirect_url: str, max_attempts: int = 3) -> List[str]:
+    """
+    redirect.php?v=... を開いて mp4 を探す。
+    - 1回目は広告に飛ばされることを想定して、同じURLに最大 max_attempts 回トライ
+    - タブを閉じて開き直す挙動を new_page() / close() で再現
     """
     collected: List[str] = []
     seen: Set[str] = set()
 
     for attempt in range(1, max_attempts + 1):
+        page = ctx.new_page()
+        page.set_extra_http_headers({
+            "Accept": HEADERS["Accept"],
+            "Accept-Language": HEADERS["Accept-Language"],
+            "Referer": HEADERS["Referer"],
+            "Connection": HEADERS["Connection"],
+        })
         try:
             page.goto(redirect_url, wait_until="domcontentloaded", timeout=20000)
-        except Exception as e:
-            print(f"[warn] redirect playwright goto failed (try={attempt}): {redirect_url} ({e})")
-            continue
-
-        # 軽く待ってから、可能なら networkidle まで待つ
-        try:
-            page.wait_for_timeout(800)
+            # 少し待ってから networkidle も試す
             try:
-                page.wait_for_load_state("networkidle", timeout=8000)
+                page.wait_for_timeout(800)
+                try:
+                    page.wait_for_load_state("networkidle", timeout=8000)
+                except Exception:
+                    pass
             except Exception:
                 pass
-        except Exception:
-            pass
 
-        final_url = page.url or ""
-        if "video.twimg.com" in final_url and ".mp4" in final_url:
-            u = final_url.strip()
+            try:
+                html = page.content() or ""
+            except Exception:
+                html = ""
+
+        except Exception as e:
+            print(f"[warn] redirect playwright goto failed (try={attempt}): {redirect_url} ({e})")
+            page.close()
+            continue
+
+        finally:
+            page.close()
+
+        if not html:
+            continue
+
+        # 実際に mp4 を探す
+        mp4s = extract_mp4_from_html(html)
+        for u in mp4s:
             if u not in seen:
                 seen.add(u)
                 collected.append(u)
 
-        html = ""
-        try:
-            html = page.content() or ""
-        except Exception:
-            html = ""
-
-        if html:
-            for m in MP4_RE.findall(html):
-                u = m.strip()
-                if u and u not in seen:
-                    seen.add(u)
-                    collected.append(u)
-
-        # この redirect で mp4 を見つけたら、これ以上このURLは追わない
         if collected:
+            # この redirect からはもう十分取れたので終了
             break
 
     return collected
@@ -224,8 +255,8 @@ def _collect_monsnode_mp4(num_pages: int, want: int) -> List[str]:
     all_mp4: List[str] = []
     seen_mp4: Set[str] = set()
 
-    # 重複などで何本か落ちる可能性があるので、少し余裕を持たせる
-    target = max(want * 3, want)   # 例: want=5 → 15本集まったらやめる
+    # 重複などを考えて、少し余裕を持った目標値
+    target = max(want * 3, want)
     if target > RAW_LIMIT:
         target = RAW_LIMIT
 
@@ -233,8 +264,10 @@ def _collect_monsnode_mp4(num_pages: int, want: int) -> List[str]:
 
     with sync_playwright() as pw:
         ctx = _playwright_ctx(pw)
-        page = ctx.new_page()
-        page.set_extra_http_headers({
+
+        # 一覧ページ用タブ
+        list_page = ctx.new_page()
+        list_page.set_extra_http_headers({
             "Accept": HEADERS["Accept"],
             "Accept-Language": HEADERS["Accept-Language"],
             "Referer": HEADERS["Referer"],
@@ -248,42 +281,41 @@ def _collect_monsnode_mp4(num_pages: int, want: int) -> List[str]:
                     ctx.close()
                     return all_mp4[:target]
 
-                # 1ページ目と2ページ目以降でURL構造が違う
+                # 1ページ目とそれ以降で URL が違う仕様
                 if p == 1:
                     list_url = f"{BASE_ORIGIN}/search.php?search={word}"
                 else:
                     list_url = f"{BASE_ORIGIN}/search.php?search={word}&page={p}&s="
 
                 try:
-                    page.goto(list_url, wait_until="domcontentloaded", timeout=20000)
+                    list_page.goto(list_url, wait_until="domcontentloaded", timeout=20000)
                 except Exception as e:
                     print(f"[warn] monsnode list goto failed: {list_url} ({e})")
                     continue
 
-                # サムネイルが遅延ロードされる可能性があるので軽くスクロール
+                # サムネイルの遅延ロード対策で軽くスクロール
                 try:
                     for _ in range(4):
-                        page.mouse.wheel(0, 1600)
-                        page.wait_for_timeout(200)
+                        list_page.mouse.wheel(0, 1600)
+                        list_page.wait_for_timeout(200)
                 except Exception:
                     pass
 
                 try:
-                    html = page.content() or ""
+                    html = list_page.content() or ""
                 except Exception:
                     html = ""
 
                 redirect_links = extract_redirect_links_from_list(html)
                 print(f"[info] monsnode list {list_url}: found {len(redirect_links)} redirect links")
 
-                # redirect.php を順に開いて mp4 抜く
                 for rurl in redirect_links:
                     if len(all_mp4) >= target:
                         print(f"[info] monsnode early stop inside redirect loop: target={target}")
                         ctx.close()
                         return all_mp4[:target]
 
-                    mp4s = resolve_redirect_to_mp4(page, rurl, max_attempts=3)
+                    mp4s = resolve_redirect_to_mp4(ctx, rurl, max_attempts=3)
                     for m in mp4s:
                         if m not in seen_mp4:
                             seen_mp4.add(m)
@@ -310,16 +342,14 @@ def fetch_listing_pages(
 ) -> List[str]:
     """
     旧 goxplorer のインターフェイス用。
-    monsnode 専用では collect_fresh_gofile_urls から直接 _collect_monsnode_mp4 を呼ぶので、
-    ここは他で使いたい場合のための簡易ラッパ。
+    通常は collect_fresh_gofile_urls から直接 _collect_monsnode_mp4 を呼ぶ。
     """
     _ = deadline_ts
-    # デフォルト want=10 としておく（外から直接呼ばれた場合用）
     return _collect_monsnode_mp4(num_pages=num_pages, want=10)
 
 
 # =========================
-#   collect_fresh_gofile_urls (bot.py から呼ばれるメイン)
+#   collect_fresh_gofile_urls (bot.py メイン入口)
 # =========================
 
 def collect_fresh_gofile_urls(
@@ -336,9 +366,8 @@ def collect_fresh_gofile_urls(
     - WANT_POST 件だけ返却
     """
 
-    _ = deadline_sec  # monsnode では内部の deadline は使わない
+    _ = deadline_sec  # 今回は使わない（monsnode専用）
 
-    # 生 mp4 URL（重複除去前）
     raw_mp4 = _collect_monsnode_mp4(num_pages=num_pages, want=want)
 
     # 既出除外（元URLベース）
@@ -353,7 +382,7 @@ def collect_fresh_gofile_urls(
 
         short = shorten_via_xgd(url)
 
-        # 短縮後URLも既に使っているならスキップ
+        # 短縮後 URL も既に使っているならスキップ
         if short in already_seen or short in results:
             continue
 
