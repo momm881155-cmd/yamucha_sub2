@@ -42,30 +42,26 @@ jobs:
         id: tktube
         timeout-minutes: 10
         env:
-          # tktube 側
+          # ★ tktube 固定
           BASE_ORIGIN: "https://tktube.com"
 
-          # 収集対象の一覧ページ
-          # 複数カテゴリ回したければ改行で増やす:
-          # TKTUBE_CATEGORY_URLS: |
-          #   https://tktube.com/ja/categories/fc2/?page={page}
-          #   https://tktube.com/ja/categories/xxx/?page={page}
-          TKTUBE_CATEGORY_URLS: "https://tktube.com/ja/categories/fc2/?page={page}"
+          # ここに欲しいカテゴリ一覧（複数行OK）
+          # {page} は 1..NUM_PAGES に展開される
+          TKTUBE_CATEGORY_URLS: |
+            https://tktube.com/ja/categories/fc2/?page={page}
 
-          # 収集関連
+          # 収集設定
           SCRAPE_TIMEOUT_SEC: 240
           RAW_LIMIT: 100
           FILTER_LIMIT: 50
-          NUM_PAGES: 3   # page=1〜3 まで回す
+          NUM_PAGES: 3
 
-          # 投稿ロジック（bot.py）
+          # 投稿件数
           WANT_POST: 5
           MIN_POST: 3
           USE_API_TIMELINE: 0
-          WAIT_ON_RATE_LIMIT: 0
-          HARD_LIMIT_SEC: 600
 
-          # X(Twitter) API keys
+          # X(Twitter)
           X_API_KEY: ${{ secrets.X_API_KEY }}
           X_API_SECRET: ${{ secrets.X_API_SECRET }}
           X_ACCESS_TOKEN: ${{ secrets.X_ACCESS_TOKEN }}
@@ -75,9 +71,6 @@ jobs:
           # x.gd API key
           XGD_API_KEY: ${{ secrets.XGD_API_KEY }}
 
-          # Proxy (必要なければ空のままでOK)
-          HTTP_PROXY: ${{ secrets.HTTP_PROXY }}
-          HTTPS_PROXY: ${{ secrets.HTTPS_PROXY }}
         run: |
           set -e
           python bot.py | tee bot_tktube.log
