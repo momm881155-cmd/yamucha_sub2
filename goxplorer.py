@@ -1,5 +1,7 @@
-# goxplorer.py — tktube 専用：Playwright で categories 一覧を開き、
-# data-preview (.mp4) を集めて x.gd で短縮して返す版
+# goxplorer.py — tktube 専用：
+# categories 一覧から data-preview の mp4 を集めて、
+# そこから embed URL (https://tktube.com/ja/embed/<id>) を作り、
+# それを x.gd で短縮して返す版
 
 import os
 import re
@@ -9,13 +11,11 @@ from urllib.parse import urljoin
 
 import requests
 from bs4 import BeautifulSoup
-from playwright.sync_api import sync_playwright
 
 # =========================
 #   設定
 # =========================
 
-# tktube のベースURL（normalize 用）
 BASE_ORIGIN = os.getenv("BASE_ORIGIN", "https://tktube.com").rstrip("/")
 
 HEADERS = {
@@ -70,6 +70,39 @@ def _normalize_url(u: str) -> str:
 
 
 # =========================
+#   mp4 → embed 変換
+# =========================
+
+# .../357435/357435_preview.mp4 の 357435 を抜くパターン
+EMBED_ID_RE = re.compile(r"/(\d+)_preview\.mp4", re.I)
+
+
+def preview_to_embed(preview_url: str) -> Optional[str]:
+    """
+    例:
+      https://pv.tkcdns.com/tk59/357000/357435/357435_preview.mp4
+        -> https://tktube.com/ja/embed/357435
+    """
+    if not preview_url:
+        return None
+
+    u = preview_url.strip()
+
+    m = EMBED_ID_RE.search(u)
+    if m:
+        vid = m.group(1)
+    else:
+        # 念のためフォールバック（/357435/xxx.mp4 みたいな形）
+        m2 = re.search(r"/(\d+)/[^/]*\.mp4", u)
+        if not m2:
+            return None
+        vid = m2.group(1)
+
+    base = BASE_ORIGIN or "https://tktube.com"
+    return f"{base}/ja/embed/{vid}"
+
+
+# =========================
 #   x.gd 短縮
 # =========================
 
@@ -101,28 +134,6 @@ def shorten_via_xgd(long_url: str) -> str:
 
 
 # =========================
-#   Playwright 共通
-# =========================
-
-def _playwright_ctx(pw):
-    """
-    categories ページを開くための Playwright コンテキスト生成。
-    """
-    browser = pw.chromium.launch(
-        headless=True,
-        args=[
-            "--no-sandbox",
-        ],
-    )
-    ctx = browser.new_context(
-        user_agent=HEADERS["User-Agent"],
-        locale="ja-JP",
-        viewport={"width": 1360, "height": 2400},
-    )
-    return ctx
-
-
-# =========================
 #   一覧ページ → data-preview (.mp4) 抽出
 # =========================
 
@@ -143,11 +154,9 @@ def extract_preview_mp4_from_list(html: str) -> List[str]:
         if not preview:
             continue
 
-        # 絶対URLならそのまま、相対なら BASE_ORIGIN からの urljoin
         full = urljoin(BASE_ORIGIN, preview.strip())
         full = _normalize_url(full)
 
-        # 一応 mp4 だけに限定
         if ".mp4" not in full:
             continue
 
@@ -163,68 +172,42 @@ def _collect_tktube_preview_urls(num_pages: int, deadline_ts: Optional[float]) -
     """
     複数カテゴリURL × page=1..num_pages を回して、
     data-preview の mp4 URL を集める。
-    HTML の取得には Playwright（Chromium）を使う。
     """
     all_urls: List[str] = []
     seen: Set[str] = set()
     category_templates = _tktube_category_urls()
 
-    from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
+    for tmpl in category_templates:
+        for page in range(1, num_pages + 1):
+            if _deadline_passed(deadline_ts):
+                print(f"[info] tktube deadline at {tmpl}, page={page}; stop.")
+                return all_urls[:RAW_LIMIT]
 
-    with sync_playwright() as pw:
-        ctx = _playwright_ctx(pw)
-        page = ctx.new_page()
-        page.set_extra_http_headers({
-            "Accept": HEADERS["Accept"],
-            "Accept-Language": HEADERS["Accept-Language"],
-            "Referer": HEADERS["Referer"],
-            "Connection": HEADERS["Connection"],
-        })
-
-        try:
-            for tmpl in category_templates:
-                for p in range(1, num_pages + 1):
-                    if _deadline_passed(deadline_ts):
-                        print(f"[info] tktube deadline at {tmpl}, page={p}; stop.")
-                        return all_urls[:RAW_LIMIT]
-
-                    list_url = tmpl.format(page=p)
-                    try:
-                        page.goto(list_url, wait_until="domcontentloaded", timeout=20000)
-                    except PlaywrightTimeoutError as e:
-                        print(f"[warn] tktube playwright timeout: {list_url} ({e})")
-                        continue
-                    except Exception as e:
-                        print(f"[warn] tktube playwright goto failed: {list_url} ({e})")
-                        continue
-
-                    # 軽くスクロールして遅延ロードを促す
-                    try:
-                        for _ in range(4):
-                            page.mouse.wheel(0, 1400)
-                            page.wait_for_timeout(200)
-                    except Exception:
-                        pass
-
-                    html = page.content()
-                    links = extract_preview_mp4_from_list(html)
-                    print(f"[info] tktube list {list_url}: found {len(links)} preview links")
-
-                    for u in links:
-                        if u in seen:
-                            continue
-                        seen.add(u)
-                        all_urls.append(u)
-                        if len(all_urls) >= RAW_LIMIT:
-                            print(f"[info] tktube early stop at RAW_LIMIT={RAW_LIMIT}")
-                            return all_urls[:RAW_LIMIT]
-
-                    time.sleep(0.2)
-        finally:
+            list_url = tmpl.format(page=page)
             try:
-                ctx.close()
-            except Exception:
-                pass
+                resp = requests.get(list_url, headers=HEADERS, timeout=20)
+            except Exception as e:
+                print(f"[warn] tktube request failed: {list_url} ({e})")
+                continue
+
+            if resp.status_code != 200:
+                print(f"[warn] tktube status {resp.status_code}: {list_url}")
+                continue
+
+            html = resp.text
+            links = extract_preview_mp4_from_list(html)
+            print(f"[info] tktube list {list_url}: found {len(links)} preview links")
+
+            for u in links:
+                if u in seen:
+                    continue
+                seen.add(u)
+                all_urls.append(u)
+                if len(all_urls) >= RAW_LIMIT:
+                    print(f"[info] tktube early stop at RAW_LIMIT={RAW_LIMIT}")
+                    return all_urls[:RAW_LIMIT]
+
+            time.sleep(0.2)
 
     return all_urls[:RAW_LIMIT]
 
@@ -239,7 +222,7 @@ def fetch_listing_pages(
 ) -> List[str]:
     """
     旧 goxplorer のインターフェイス互換。
-    tktube の data-preview mp4 URL リストを返す。
+    まずは data-preview mp4 URL リストを返す。
     """
     return _collect_tktube_preview_urls(num_pages=num_pages, deadline_ts=deadline_ts)
 
@@ -256,8 +239,9 @@ def collect_fresh_gofile_urls(
 ) -> List[str]:
     """
     - tktube から data-preview の mp4 URL を集める
+    - そこから embed URL を生成：https://tktube.com/ja/embed/<id>
     - state.json 由来の already_seen で重複を除外
-      （元URL・短縮URL 両方をチェック）
+      （embed URL・短縮URL でチェック）
     - x.gd で短縮
     - want 件だけ返す
     """
@@ -272,7 +256,7 @@ def collect_fresh_gofile_urls(
 
     deadline_ts = (_now() + deadline_sec) if deadline_sec else None
 
-    # 生の mp4 一覧（categories / fc2 / 他カテゴリ）
+    # 生の mp4 一覧
     raw_urls = fetch_listing_pages(num_pages=num_pages, deadline_ts=deadline_ts)
 
     # 多すぎると時間がかかるので、まず FILTER_LIMIT 件に絞る
@@ -281,30 +265,35 @@ def collect_fresh_gofile_urls(
     results: List[str] = []
     seen_now: Set[str] = set()
 
-    for url in candidates:
+    for preview_url in candidates:
         if _deadline_passed(deadline_ts):
             print("[info] deadline reached during filtering; stop.")
             break
 
-        norm_url = _normalize_url(url)
+        embed_url = preview_to_embed(preview_url)
+        if not embed_url:
+            # 万一パターンが取れなければ、従来通り preview を使う
+            embed_url = preview_url
 
-        # 同一 run 内での重複
-        if norm_url in seen_now:
+        norm_embed = _normalize_url(embed_url)
+
+        # 同一 run 内の重複
+        if norm_embed in seen_now:
             continue
 
-        # 元 URL が既に state.json にあるならスキップ
-        if norm_url in already_seen:
+        # 既に state.json に embed URL があるならスキップ
+        if norm_embed in already_seen:
             continue
 
-        # x.gd で短縮
-        short = shorten_via_xgd(url)
+        # x.gd で短縮（embed URL を短縮）
+        short = shorten_via_xgd(embed_url)
         norm_short = _normalize_url(short)
 
         # 短縮後 URL が既に state.json にあるならスキップ
         if norm_short in already_seen:
             continue
 
-        seen_now.add(norm_url)
+        seen_now.add(norm_embed)
         results.append(short)
 
         if len(results) >= want:
