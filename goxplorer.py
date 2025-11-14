@@ -1,15 +1,17 @@
-# goxplorer.py — monsnode redirect 専用版（bot.py 互換 / mp4 は追わない）
+# goxplorer.py — monsnode redirect 専用版（bot.py 互換 / mp4 には潜らない）
 
 import os
 import re
 import time
 from typing import List, Set, Optional
+from urllib.parse import urljoin
 
 import requests
+from bs4 import BeautifulSoup
 from playwright.sync_api import sync_playwright
 
 # =========================
-#   設定
+#   基本設定
 # =========================
 
 BASE_ORIGIN = os.getenv("BASE_ORIGIN", "https://monsnode.com").rstrip("/")
@@ -18,7 +20,7 @@ HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
         "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/123.0.0.0 Safari/123.0.0.0"
+        "Chrome/123.0.0.0 Safari/537.36"
     ),
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
     "Accept-Language": "ja-JP,ja;q=0.9,en-US;q=0.8,en;q=0.7",
@@ -26,8 +28,8 @@ HEADERS = {
     "Connection": "keep-alive",
 }
 
-RAW_LIMIT    = int(os.getenv("RAW_LIMIT", "100"))  # 1回の最大生URL数
-FILTER_LIMIT = int(os.getenv("FILTER_LIMIT", "50"))
+RAW_LIMIT    = int(os.getenv("RAW_LIMIT", "100"))   # 1回の最大生URL数
+FILTER_LIMIT = int(os.getenv("FILTER_LIMIT", "50"))  # フィルタ後の上限
 
 
 def _monsnode_search_words() -> List[str]:
@@ -42,7 +44,7 @@ def _monsnode_search_words() -> List[str]:
         if words:
             return words
 
-    # デフォルト 5サイト相当の語
+    # デフォルト 5つ
     return [
         "992ultra",
         "verycoolav",
@@ -92,7 +94,7 @@ def shorten_via_xgd(long_url: str) -> str:
 
 
 # =========================
-#   Playwright 共通
+#   Playwright（HTML取得専用）
 # =========================
 
 def _playwright_ctx(pw):
@@ -117,114 +119,113 @@ def _playwright_ctx(pw):
     return ctx
 
 
+def fetch_html_with_playwright(url: str, timeout_ms: int = 20000) -> Optional[str]:
+    """
+    monsnode は requests だけだと 403 になりやすいので、
+    Playwright で HTML を取得してから BeautifulSoup で解析する。
+    """
+    try:
+        with sync_playwright() as pw:
+            ctx = _playwright_ctx(pw)
+            page = ctx.new_page()
+            page.set_extra_http_headers({
+                "Accept": HEADERS["Accept"],
+                "Accept-Language": HEADERS["Accept-Language"],
+                "Referer": HEADERS["Referer"],
+                "Connection": HEADERS["Connection"],
+            })
+
+            page.goto(url, wait_until="domcontentloaded", timeout=timeout_ms)
+
+            # jscroll の遅延ロード対策で軽くスクロール
+            try:
+                for _ in range(4):
+                    page.mouse.wheel(0, 1400)
+                    page.wait_for_timeout(200)
+            except Exception:
+                pass
+
+            html = page.content()
+            ctx.close()
+            return html
+    except Exception as e:
+        print(f"[warn] fetch_html_with_playwright failed: {url} ({e})")
+        return None
+
+
 # =========================
-#   検索ページ → redirect.php リンク抽出
+#   一覧ページ → redirect.php 抽出
 # =========================
 
+def extract_redirect_links_from_list(html: str) -> List[str]:
+    """
+    検索結果ページから redirect.php?v=... のリンクを全部抜く。
+    """
+    if not html:
+        return []
+
+    soup = BeautifulSoup(html, "html.parser")
+    links: List[str] = []
+    seen: Set[str] = set()
+
+    for a in soup.find_all("a", href=True):
+        href = a["href"].strip()
+        if "redirect.php?v=" not in href:
+            continue
+
+        # 相対パスだったら絶対URLに
+        full = urljoin(BASE_ORIGIN, href)
+        if full not in seen:
+            seen.add(full)
+            links.append(full)
+
+    return links
+
+
 def _collect_redirect_urls_from_search_pages(
-    num_pages_hint: int,
+    num_pages: int,
     deadline_ts: Optional[float],
 ) -> List[str]:
     """
-    monsnode の search.php?search=WORD ページを Playwright で開き、
-    jscroll による追い読みを含めてスクロールしながら
-
-        <a href="https://monsnode.com/redirect.php?v=XXXXX">
-
-    を全部拾う。
-    992ultra だけでなく verycoolav / bestav8 なども同じ処理で取る。
+    monsnode の search.php?search=WORD (&page=N) を直接叩いて、
+    redirect.php?v=... のURLを集める。
     """
     all_urls: List[str] = []
     seen: Set[str] = set()
 
     search_words = _monsnode_search_words()
 
-    # num_pages_hint は「どれくらいスクロールするか」の目安にだけ使う
-    max_scrolls_per_word = max(6, num_pages_hint * 6)
-
-    with sync_playwright() as pw:
-        ctx = _playwright_ctx(pw)
-        page = ctx.new_page()
-        page.set_extra_http_headers({
-            "Accept": HEADERS["Accept"],
-            "Accept-Language": HEADERS["Accept-Language"],
-            "Referer": HEADERS["Referer"],
-            "Connection": HEADERS["Connection"],
-        })
-
-        for word in search_words:
+    for word in search_words:
+        for page in range(1, num_pages + 1):
             if _deadline_passed(deadline_ts):
-                print(f"[info] monsnode deadline before search={word}; stop.")
-                break
+                print(f"[info] monsnode deadline at search={word}, page={page}; stop.")
+                return all_urls[:RAW_LIMIT]
 
-            search_url = f"{BASE_ORIGIN}/search.php?search={word}"
-            try:
-                page.goto(search_url, wait_until="domcontentloaded", timeout=20000)
-            except Exception as e:
-                print(f"[warn] monsnode search load failed: {search_url} ({e})")
+            if page == 1:
+                list_url = f"{BASE_ORIGIN}/search.php?search={word}"
+            else:
+                # これまで 80 件取れていた仕様に合わせる
+                list_url = f"{BASE_ORIGIN}/search.php?search={word}&page={page}&s="
+
+            html = fetch_html_with_playwright(list_url)
+            if not html:
+                print(f"[warn] monsnode fetch failed: {list_url}")
                 continue
 
-            # 可能なら「Latest」に切り替え（ボタンが無ければ無視）
-            try:
-                page.click("a.sort-btn[href*='s=n']", timeout=3000)
-                page.wait_for_load_state("networkidle", timeout=10000)
-            except Exception:
-                pass
+            redirect_links = extract_redirect_links_from_list(html)
+            print(f"[info] monsnode list {list_url}: found {len(redirect_links)} redirect links")
 
-            # jscroll での遅延読み込み用にスクロールしまくる
-            prev_h = 0
-            for i in range(max_scrolls_per_word):
-                if _deadline_passed(deadline_ts):
-                    break
-                try:
-                    page.mouse.wheel(0, 1800)
-                except Exception:
-                    pass
-                page.wait_for_timeout(300)
-                try:
-                    h = page.evaluate("() => document.body.scrollHeight") or 0
-                except Exception:
-                    h = 0
-                if h == prev_h:
-                    # もう増えなければちょっと待って二度確認
-                    page.wait_for_timeout(400)
-                    try:
-                        h2 = page.evaluate("() => document.body.scrollHeight") or 0
-                    except Exception:
-                        h2 = 0
-                    if h2 == prev_h:
-                        break
-                    prev_h = h2
-                else:
-                    prev_h = h
-
-            # すべて読み込んだ後、redirect.php?v= を全部拾う
-            try:
-                hrefs = page.eval_on_selector_all(
-                    'a[href*="redirect.php?v="]',
-                    'els => els.map(a => a.href)',
-                ) or []
-            except Exception:
-                hrefs = []
-
-            print(f"[info] monsnode search={word}: found {len(hrefs)} redirect links")
-
-            for raw in hrefs:
-                if not raw:
+            for u in redirect_links:
+                if u in seen:
                     continue
-                url = raw.strip()
-                if not url:
-                    continue
-                if url in seen:
-                    continue
-                seen.add(url)
-                all_urls.append(url)
+                seen.add(u)
+                all_urls.append(u)
                 if len(all_urls) >= RAW_LIMIT:
                     print(f"[info] monsnode early stop at RAW_LIMIT={RAW_LIMIT}")
-                    ctx.close()
                     return all_urls[:RAW_LIMIT]
 
-        ctx.close()
+            # サーバーへの負荷軽減
+            time.sleep(0.1)
 
     return all_urls[:RAW_LIMIT]
 
@@ -240,12 +241,11 @@ def fetch_listing_pages(
     """
     旧 goxplorer 互換インターフェイス。
     monsnode 専用。
-    - 各 search ワードの検索ページを開く
-    - 無限スクロールで一覧を全部読み込む
-    - redirect.php?v=XXXX の URL をまとめて返す
+    - 各 search ワードの search.php?search=WORD (&page=2,3) を開く
+    - redirect.php?v=XXXX をまとめて返す
     """
     return _collect_redirect_urls_from_search_pages(
-        num_pages_hint=num_pages,
+        num_pages=num_pages,
         deadline_ts=deadline_ts,
     )
 
@@ -263,6 +263,7 @@ def collect_fresh_gofile_urls(
     """
     bot.py から呼び出されるメイン関数。
     ここでは「gofile」ではなく monsnode redirect URL を扱う。
+
     - monsnode から redirect.php?v=XXXX の URL を集める
     - state.json 由来の already_seen でフィルタ
     - x.gd で短縮
