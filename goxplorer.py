@@ -1,4 +1,4 @@
-# goxplorer.py — tktube 用: data-preview の mp4 を集めて x.gd で短縮して返す版
+# goxplorer.py — tktube 専用：categories 一覧から data-preview (.mp4) を集めて x.gd で短縮して返す
 
 import os
 import re
@@ -10,10 +10,10 @@ import requests
 from bs4 import BeautifulSoup
 
 # =========================
-#   基本設定
+#   設定
 # =========================
 
-# tktube のベースURL（必要なら env で上書き可能）
+# tktube のベースURL（ほぼ使わないが normalize 用に残す）
 BASE_ORIGIN = os.getenv("BASE_ORIGIN", "https://tktube.com").rstrip("/")
 
 HEADERS = {
@@ -24,40 +24,19 @@ HEADERS = {
     ),
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
     "Accept-Language": "ja-JP,ja;q=0.9,en-US;q=0.8,en;q=0.7",
-    "Referer": BASE_ORIGIN,
+    "Referer": "https://tktube.com",
     "Connection": "keep-alive",
 }
 
 RAW_LIMIT    = int(os.getenv("RAW_LIMIT", "100"))
 FILTER_LIMIT = int(os.getenv("FILTER_LIMIT", "50"))
 
-def _now() -> float:
-    return time.monotonic()
 
-def _deadline_passed(deadline_ts: Optional[float]) -> bool:
-    return deadline_ts is not None and _now() >= deadline_ts
-
-def _normalize_url(u: str) -> str:
-    if not u:
-        return u
-    u = u.strip()
-    u = re.sub(r"^http://", "https://", u, flags=re.I)
-    return u.rstrip("/")
-
-
-# =========================
-#   スクレイピング対象URLリスト
-# =========================
-#   ★ここを少しいじれば、他カテゴリにも流用できます。
-
-def _listing_urls() -> List[str]:
+def _tktube_category_urls() -> List[str]:
     """
-    収集対象の一覧ページURLを返す。
-
-    - 環境変数 TKTUBE_CATEGORY_URLS があればそちらを優先
-      （カンマ or 改行区切りで複数指定可）
-      例:
-        TKTUBE_CATEGORY_URLS="https://tktube.com/ja/categories/fc2/?page={page}"
+    収集対象のカテゴリ一覧URLテンプレートを返す。
+    TKTUBE_CATEGORY_URLS 環境変数があればそれを優先（改行 or カンマ区切り）。
+    {page} プレースホルダを 1..NUM_PAGES で埋める想定。
     """
     env = os.getenv("TKTUBE_CATEGORY_URLS", "").strip()
     if env:
@@ -66,10 +45,26 @@ def _listing_urls() -> List[str]:
         if urls:
             return urls
 
-    # デフォルト: ご提示の fc2 カテゴリ（?page={page} は後で format される）
+    # デフォルト：fc2 カテゴリ
     return [
-        f"{BASE_ORIGIN}/ja/categories/fc2/?page={{page}}",
+        "https://tktube.com/ja/categories/fc2/?page={page}",
     ]
+
+
+def _now() -> float:
+    return time.monotonic()
+
+
+def _deadline_passed(deadline_ts: Optional[float]) -> bool:
+    return deadline_ts is not None and _now() >= deadline_ts
+
+
+def _normalize_url(u: str) -> str:
+    if not u:
+        return u
+    u = u.strip()
+    u = re.sub(r"^http://", "https://", u, flags=re.I)
+    return u.rstrip("/")
 
 
 # =========================
@@ -104,85 +99,79 @@ def shorten_via_xgd(long_url: str) -> str:
 
 
 # =========================
-#   一覧ページ → data-preview の mp4 抽出
+#   一覧ページ → data-preview (.mp4) 抽出
 # =========================
 
-def extract_preview_mp4_from_listing(html: str) -> List[str]:
+def extract_preview_mp4_from_list(html: str) -> List[str]:
     """
-    一覧ページの HTML から data-preview="...mp4" を全部抜き出す。
-
-    例: 
-      <img src="...jpg"
-           data-preview="https://pv.tkcdns.com/.../357384_preview.mp4"
-           ...>
+    カテゴリ一覧ページの HTML から、
+    <img data-preview="...mp4"> の URL を全部抜く。
     """
     if not html:
         return []
 
     soup = BeautifulSoup(html, "html.parser")
-    urls: List[str] = []
+    links: List[str] = []
     seen: Set[str] = set()
 
-    # data-preview 属性を持つ全タグを対象にする
-    for tag in soup.find_all(attrs={"data-preview": True}):
-        pv = (tag.get("data-preview") or "").strip()
-        if not pv:
+    for img in soup.find_all("img"):
+        preview = img.get("data-preview")
+        if not preview:
             continue
 
-        # 絶対URL / 相対URL 両対応
-        full = pv if pv.startswith("http") else urljoin(BASE_ORIGIN, pv)
+        # 絶対URLならそのまま、相対なら BASE_ORIGIN からの urljoin
+        full = urljoin(BASE_ORIGIN, preview.strip())
         full = _normalize_url(full)
+
+        # 一応 mp4 だけに限定
+        if ".mp4" not in full:
+            continue
 
         if full not in seen:
             seen.add(full)
-            urls.append(full)
+            links.append(full)
 
-    print(f"[debug] extract_preview_mp4_from_listing: {len(urls)} urls")
-    return urls
+    print(f"[debug] extract_preview_mp4_from_list: {len(links)} links")
+    return links
 
 
-def _collect_preview_urls(num_pages: int, deadline_ts: Optional[float]) -> List[str]:
+def _collect_tktube_preview_urls(num_pages: int, deadline_ts: Optional[float]) -> List[str]:
     """
-    - _listing_urls() でカテゴリ一覧URLを取得
-    - 各ページから data-preview の mp4 を回収
+    複数カテゴリURL × page=1..num_pages を回して、
+    data-preview の mp4 URL を集める。
     """
     all_urls: List[str] = []
     seen: Set[str] = set()
-    listing_bases = _listing_urls()
+    category_templates = _tktube_category_urls()
 
-    for base_url in listing_bases:
-        for p in range(1, num_pages + 1):
+    for tmpl in category_templates:
+        for page in range(1, num_pages + 1):
             if _deadline_passed(deadline_ts):
-                print(f"[info] deadline at base={base_url}, page={p}; stop.")
+                print(f"[info] tktube deadline at {tmpl}, page={page}; stop.")
                 return all_urls[:RAW_LIMIT]
 
-            # ページング
-            if "{page}" in base_url:
-                list_url = base_url.format(page=p)
-            else:
-                # ?page がないURLなら1ページ目だけ
-                if p > 1:
-                    break
-                list_url = base_url
-
+            list_url = tmpl.format(page=page)
             try:
                 resp = requests.get(list_url, headers=HEADERS, timeout=20)
-                resp.raise_for_status()
             except Exception as e:
-                print(f"[warn] listing requests failed: {list_url} ({e})")
+                print(f"[warn] tktube request failed: {list_url} ({e})")
+                continue
+
+            if resp.status_code != 200:
+                print(f"[warn] tktube status {resp.status_code}: {list_url}")
                 continue
 
             html = resp.text
-            previews = extract_preview_mp4_from_listing(html)
-            print(f"[info] list {list_url}: found {len(previews)} preview mp4")
+            links = extract_preview_mp4_from_list(html)
+            print(f"[info] tktube list {list_url}: found {len(links)} preview links")
 
-            for u in previews:
+            for u in links:
                 if u in seen:
                     continue
                 seen.add(u)
                 all_urls.append(u)
                 if len(all_urls) >= RAW_LIMIT:
-                    print(f"[info] early stop at RAW_LIMIT={RAW_LIMIT}")
+                    print(f"[info] tktube early stop at RAW_LIMIT={RAW_LIMIT}")
                     return all_urls[:RAW_LIMIT]
 
             time.sleep(0.2)
@@ -199,10 +188,10 @@ def fetch_listing_pages(
     deadline_ts: Optional[float] = None
 ) -> List[str]:
     """
-    旧 goxplorer と同じインターフェイス。
-    ここでは「data-preview の mp4 URL の生リスト」を返す。
+    旧 goxplorer のインターフェイス互換。
+    tktube の data-preview mp4 URL リストを返す。
     """
-    return _collect_preview_urls(num_pages=num_pages, deadline_ts=deadline_ts)
+    return _collect_tktube_preview_urls(num_pages=num_pages, deadline_ts=deadline_ts)
 
 
 # =========================
@@ -216,7 +205,7 @@ def collect_fresh_gofile_urls(
     deadline_sec: Optional[int] = None,
 ) -> List[str]:
     """
-    - data-preview の mp4 URL を集める
+    - tktube から data-preview の mp4 URL を集める
     - state.json 由来の already_seen で重複を除外
       （元URL・短縮URL 両方をチェック）
     - x.gd で短縮
@@ -233,10 +222,10 @@ def collect_fresh_gofile_urls(
 
     deadline_ts = (_now() + deadline_sec) if deadline_sec else None
 
-    # 生の mp4 URL 一覧
+    # 生の mp4 一覧
     raw_urls = fetch_listing_pages(num_pages=num_pages, deadline_ts=deadline_ts)
 
-    # 多すぎると時間がかかるので上限
+    # 多すぎると時間がかかるので、まず FILTER_LIMIT 件に絞る
     candidates = raw_urls[: max(1, FILTER_LIMIT)]
 
     results: List[str] = []
@@ -249,11 +238,11 @@ def collect_fresh_gofile_urls(
 
         norm_url = _normalize_url(url)
 
-        # 同一 run 内の重複
+        # 同一 run 内での重複
         if norm_url in seen_now:
             continue
 
-        # 元URL がすでに state.json にある場合はスキップ
+        # 元 URL が既に state.json にあるならスキップ
         if norm_url in already_seen:
             continue
 
@@ -261,7 +250,7 @@ def collect_fresh_gofile_urls(
         short = shorten_via_xgd(url)
         norm_short = _normalize_url(short)
 
-        # 短縮後 URL が state.json にある場合もスキップ
+        # 短縮後 URL が既に state.json にあるならスキップ
         if norm_short in already_seen:
             continue
 
