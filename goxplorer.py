@@ -31,7 +31,7 @@ HEADERS = {
 RAW_LIMIT    = int(os.getenv("RAW_LIMIT", "100"))
 FILTER_LIMIT = int(os.getenv("FILTER_LIMIT", "50"))
 
-# ▼▼▼ ここで「先ほどの URL」をベースとして使う ▼▼▼
+
 def _monsnode_search_urls() -> List[str]:
     """
     検索スタートとなる search.php の URL 群。
@@ -44,7 +44,7 @@ def _monsnode_search_urls() -> List[str]:
         if urls:
             return urls
 
-    # デフォルト：あなたが指定した 5 本
+    # デフォルト：指定の 5 本
     return [
         "https://monsnode.com/search.php?search=992ultra",
         "https://monsnode.com/search.php?search=verycoolav",
@@ -140,6 +140,7 @@ def fetch_html_with_playwright(url: str, timeout_ms: int = 20000) -> Optional[st
             })
 
             page.goto(url, wait_until="domcontentloaded", timeout=timeout_ms)
+
             # 軽くスクロールして遅延ロードを促す
             try:
                 for _ in range(4):
@@ -162,8 +163,13 @@ def fetch_html_with_playwright(url: str, timeout_ms: int = 20000) -> Optional[st
 
 def extract_detail_links_from_list(html: str) -> List[str]:
     """
-    検索結果ページから動画詳細ページへのリンクを抽出する。
-    例: <a href="/v1951182235140274713"> ... </a>
+    検索結果ページから「動画詳細 or リダイレクトページ」へのリンクを抽出する。
+
+    例:
+      - https://monsnode.com/v1951182235140274713
+      - https://monsnode.com/redirect.php?v=20892092
+
+    どちらも、クリックの先で mp4 が見つかる可能性があるので対象にする。
     """
     if not html:
         return []
@@ -172,15 +178,25 @@ def extract_detail_links_from_list(html: str) -> List[str]:
     links: List[str] = []
     seen: Set[str] = set()
 
-    # href に "/v" を含む a タグを全部拾う（/v数字... の詳細ページ）
     for a in soup.find_all("a", href=True):
-        href = a["href"].strip()
-        if "/v" not in href:
+        href = (a["href"] or "").strip()
+        if not href:
             continue
+
+        # 絶対URLに正規化
         full = urljoin(BASE_ORIGIN, href)
-        if full not in seen:
-            seen.add(full)
-            links.append(full)
+
+        # monsnode 以外（広告ドメインなど）は無視
+        if "monsnode.com" not in full:
+            continue
+
+        # 対象とするリンク:
+        #   - /vxxxxx... （ユーザページ/動画詳細）
+        #   - redirect.php?v=xxxxxx （広告挟まるが最終的に mp4 へ飛ぶ）
+        if ("/v" in full) or ("redirect.php?v=" in full):
+            if full not in seen:
+                seen.add(full)
+                links.append(full)
 
     return links
 
@@ -190,7 +206,9 @@ def extract_detail_links_from_list(html: str) -> List[str]:
 # =========================
 
 def extract_mp4_urls_from_detail(url: str) -> List[str]:
-    """動画詳細ページ（/v....）から video.twimg.com の .mp4 を抽出。"""
+    """
+    動画詳細ページ（/v..., redirect.php?v=...）から video.twimg.com の .mp4 を抽出。
+    """
     html = fetch_html_with_playwright(url)
     if not html:
         return []
@@ -214,7 +232,7 @@ def extract_mp4_urls_from_detail(url: str) -> List[str]:
 def _collect_monsnode_urls(num_pages: int, deadline_ts: Optional[float]) -> List[str]:
     """
     monsnode の search 結果から:
-      - /v... 形式の動画ページURLを取得
+      - /v... 形式 or redirect.php?v=... のページURLを取得
       - そこから mp4 を抜き出し
     生の mp4 URL を返す（短縮は別フェーズ）。
     """
@@ -308,8 +326,10 @@ def collect_fresh_gofile_urls(
 
     deadline_ts = (_now() + deadline_sec) if deadline_sec else None
 
+    # 生の mp4 URL 一覧
     raw_mp4 = fetch_listing_pages(num_pages=num_pages, deadline_ts=deadline_ts)
 
+    # 既出除外（元 mp4 URL が state にあればスキップ）
     candidates = [u for u in raw_mp4 if u not in already_seen][:max(1, FILTER_LIMIT)]
 
     results: List[str] = []
@@ -328,7 +348,6 @@ def collect_fresh_gofile_urls(
         if short in already_seen:
             continue
 
-        # ここから下に「日本語の素の行」は絶対に入れない！
         seen_now.add(url)
         results.append(short)
 
