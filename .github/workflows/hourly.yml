@@ -46,11 +46,14 @@ jobs:
           # monsnode 側
           BASE_ORIGIN: "https://monsnode.com"
 
+          # 検索ワードを追加・変更したければここ（or MONSNODE_SEARCH_TERMS でカンマ区切り）
+          # MONSNODE_SEARCH_TERMS: "992ultra,verycoolav,bestav8,movieszzzz,himitukessya0"
+
           # 収集関連
           SCRAPE_TIMEOUT_SEC: 240
           RAW_LIMIT: 40
           FILTER_LIMIT: 18
-          NUM_PAGES: 3   # 各 search ワードについて page=1〜3 まで
+          NUM_PAGES: 3   # 各 search ワードについて page=1〜3 まで回す
 
           # 投稿ロジック（bot.py そのまま利用）
           WANT_POST: 5
@@ -59,7 +62,7 @@ jobs:
           WAIT_ON_RATE_LIMIT: 0
           HARD_LIMIT_SEC: 600
 
-          # X(Twitter) API keys（使わないなら空でもOK）
+          # X(Twitter) API keys（※今は投稿に使わないなら空でもOKですが、bot.pyが呼ぶので一応セット推奨）
           X_API_KEY: ${{ secrets.X_API_KEY }}
           X_API_SECRET: ${{ secrets.X_API_SECRET }}
           X_ACCESS_TOKEN: ${{ secrets.X_ACCESS_TOKEN }}
@@ -69,7 +72,7 @@ jobs:
           # x.gd API key
           XGD_API_KEY: ${{ secrets.XGD_API_KEY }}
 
-          # Proxy (必要なければ空のまま)
+          # Proxy (必要なければ空のままでOK)
           HTTP_PROXY: ${{ secrets.HTTP_PROXY }}
           HTTPS_PROXY: ${{ secrets.HTTPS_PROXY }}
         run: |
