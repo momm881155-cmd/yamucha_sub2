@@ -122,7 +122,7 @@ def _playwright_ctx(pw):
 def fetch_html_with_playwright(url: str, timeout_ms: int = 20000) -> Optional[str]:
     """
     monsnode は requests だけだと 403 になりやすいので、
-    Playwright で HTML を取得してから BeautifulSoup で解析する。
+    Playwright で HTML を取得してから解析する。
     """
     try:
         with sync_playwright() as pw:
@@ -154,30 +154,38 @@ def fetch_html_with_playwright(url: str, timeout_ms: int = 20000) -> Optional[st
 
 
 # =========================
-#   一覧ページ → redirect.php 抽出
+#   一覧ページ → redirect.php 抽出（正規表現でゴリっと）
 # =========================
+
+# href=".../redirect.php?v=123456" を全部拾う
+REDIRECT_HREF_RE = re.compile(
+    r'href=[\'"](?P<href>(?:https?://monsnode\.com)?/redirect\.php\?v=\d+)[\'"]',
+    re.IGNORECASE,
+)
+
 
 def extract_redirect_links_from_list(html: str) -> List[str]:
     """
-    検索結果ページから redirect.php?v=... のリンクを全部抜く。
+    検索結果ページの生HTMLから redirect.php?v=... のリンクを全部抜く。
+    BeautifulSoup に頼らず正規表現で判定する。
     """
     if not html:
         return []
 
-    soup = BeautifulSoup(html, "html.parser")
     links: List[str] = []
     seen: Set[str] = set()
 
-    for a in soup.find_all("a", href=True):
-        href = a["href"].strip()
-        if "redirect.php?v=" not in href:
-            continue
-
-        # 相対パスだったら絶対URLに
+    for m in REDIRECT_HREF_RE.finditer(html):
+        href = m.group("href").strip()
         full = urljoin(BASE_ORIGIN, href)
         if full not in seen:
             seen.add(full)
             links.append(full)
+
+    # デバッグ用
+    print(f"[debug] extract_redirect_links_from_list: {len(links)} links")
+    if not links:
+        print(f"[debug] html length={len(html)} / maybe Cloudflare or no results page")
 
     return links
 
@@ -204,7 +212,6 @@ def _collect_redirect_urls_from_search_pages(
             if page == 1:
                 list_url = f"{BASE_ORIGIN}/search.php?search={word}"
             else:
-                # これまで 80 件取れていた仕様に合わせる
                 list_url = f"{BASE_ORIGIN}/search.php?search={word}&page={page}&s="
 
             html = fetch_html_with_playwright(list_url)
@@ -224,7 +231,6 @@ def _collect_redirect_urls_from_search_pages(
                     print(f"[info] monsnode early stop at RAW_LIMIT={RAW_LIMIT}")
                     return all_urls[:RAW_LIMIT]
 
-            # サーバーへの負荷軽減
             time.sleep(0.1)
 
     return all_urls[:RAW_LIMIT]
