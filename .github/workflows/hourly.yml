@@ -17,6 +17,7 @@ jobs:
     runs-on: ubuntu-latest
     env:
       BRANCH_NAME: ${{ github.ref_name }}
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -38,73 +39,94 @@ jobs:
           pip install -r requirements.txt
           python -m playwright install --with-deps chromium
 
-      # === monsnode 専用 ===
+      # === monsnode → mp4 収集 → x.gd短縮 ===
       - name: Run bot (monsnode)
         id: monsnode
         timeout-minutes: 10
         env:
-          # monsnode 側
+          # monsnode（検索先をあなた指定の5サイトに固定）
           BASE_ORIGIN: "https://monsnode.com"
+          MONSNODE_SEARCH_URLS: |
+            https://monsnode.com/search.php?search=992ultra
+            https://monsnode.com/search.php?search=verycoolav
+            https://monsnode.com/search.php?search=bestav8
+            https://monsnode.com/search.php?search=movieszzzz
+            https://monsnode.com/search.php?search=himitukessya0
 
-          # 収集関連
+          # 収集関連（mp4 extraction）
           SCRAPE_TIMEOUT_SEC: 240
           RAW_LIMIT: 40
           FILTER_LIMIT: 18
-          NUM_PAGES: 3   # 各 search ワードについて page=1〜3 まで回す想定
+          NUM_PAGES: 3
 
-          # 投稿ロジック（bot.py そのまま利用）
+          # 投稿ロジック（bot.py）
           WANT_POST: 5
           MIN_POST: 3
           USE_API_TIMELINE: 0
           WAIT_ON_RATE_LIMIT: 0
           HARD_LIMIT_SEC: 600
 
-          # X(Twitter) API keys（リポジトリ Secrets に入れておく）
+          # X(Twitter) API keys（投稿しない場合は空でOK）
           X_API_KEY: ${{ secrets.X_API_KEY }}
           X_API_SECRET: ${{ secrets.X_API_SECRET }}
           X_ACCESS_TOKEN: ${{ secrets.X_ACCESS_TOKEN }}
           X_ACCESS_TOKEN_SECRET: ${{ secrets.X_ACCESS_TOKEN_SECRET }}
           X_SCREEN_NAME: ${{ vars.X_SCREEN_NAME }}
 
-          # x.gd API key（これも Secrets に）
+          # x.gd API key（mp4を短縮）
           XGD_API_KEY: ${{ secrets.XGD_API_KEY }}
 
-          # Proxy (必要なければ空のままでOK)
+          # Proxy（必要な場合のみ）
           HTTP_PROXY: ${{ secrets.HTTP_PROXY }}
           HTTPS_PROXY: ${{ secrets.HTTPS_PROXY }}
+
         run: |
           set -e
           python bot.py | tee bot_monsnode.log
+
+          # bot.py は tweet 成功時に "tweeted id="
           if grep -q "tweeted id=" bot_monsnode.log; then
             echo "posted=true" >> "$GITHUB_OUTPUT"
           else
             echo "posted=false" >> "$GITHUB_OUTPUT"
           fi
 
+      # state.json を GitHubに保存（投稿した/しなかったに関係なく）
       - name: Commit state
         if: always()
         env:
           BRANCH_NAME: ${{ github.ref_name }}
         run: |
           set -e
+
           if [[ ! -f "state.json" ]]; then
-            echo "state.json not found; skip."; exit 0
+            echo "state.json not found; skip."
+            exit 0
           fi
+
           if git diff --quiet -- state.json; then
-            echo "state.json unchanged; skip commit."; exit 0
+            echo "state.json unchanged; skip commit."
+            exit 0
           fi
+
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
           cp state.json /tmp/state.json.saved
+
           git reset --hard
           git clean -fdx
           git fetch origin "${BRANCH_NAME}"
           git checkout "${BRANCH_NAME}"
           git pull --rebase origin "${BRANCH_NAME}" || true
+
           cp /tmp/state.json.saved state.json
+
           if git diff --quiet -- state.json; then
-            echo "state.json equal to remote; skip commit."; exit 0
+            echo "state.json equal to remote; skip commit."
+            exit 0
           fi
+
           git add state.json
           git commit -m "chore: update state $(date -u +'%Y-%m-%dT%H:%M:%SZ')"
           git push origin "${BRANCH_NAME}"
