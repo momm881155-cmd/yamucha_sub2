@@ -1,22 +1,23 @@
-# goxplorer.py — tktube 専用：
-# categories 一覧から data-preview の mp4 を集めて、
-# そこから embed URL (https://tktube.com/ja/embed/<id>) を作り、
-# それを x.gd で短縮して返す版
+# goxplorer.py — tktube + Googleスプレッドシート専用版
+# - スプシB列の tktube 動画URL から embed URL を作成
+# - x.gd で短縮
+# - 使った行の D 列に投稿日時を書き込む
+# - bot.py からは collect_fresh_gofile_urls() だけ今まで通り呼べる
 
 import os
 import re
+import json
 import time
-from typing import List, Set, Optional
-from urllib.parse import urljoin
+from datetime import datetime, timezone
+from typing import List, Set, Optional, Tuple
 
 import requests
-from bs4 import BeautifulSoup
+import gspread
+from google.oauth2.service_account import Credentials
 
 # =========================
-#   設定
+#  設定・共通ユーティリティ
 # =========================
-
-BASE_ORIGIN = os.getenv("BASE_ORIGIN", "https://tktube.com").rstrip("/")
 
 HEADERS = {
     "User-Agent": (
@@ -26,31 +27,14 @@ HEADERS = {
     ),
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
     "Accept-Language": "ja-JP,ja;q=0.9,en-US;q=0.8,en;q=0.7",
-    "Referer": "https://tktube.com",
     "Connection": "keep-alive",
 }
 
-RAW_LIMIT    = int(os.getenv("RAW_LIMIT", "100"))
-FILTER_LIMIT = int(os.getenv("FILTER_LIMIT", "50"))
+RAW_LIMIT    = int(os.getenv("RAW_LIMIT", "100"))   # 形式だけ残す（ほぼ未使用）
+FILTER_LIMIT = int(os.getenv("FILTER_LIMIT", "50")) # 同上
 
-
-def _tktube_category_urls() -> List[str]:
-    """
-    収集対象のカテゴリ一覧URLテンプレートを返す。
-    TKTUBE_CATEGORY_URLS 環境変数があればそれを優先（改行 or カンマ区切り）。
-    {page} プレースホルダを 1..NUM_PAGES で埋める想定。
-    """
-    env = os.getenv("TKTUBE_CATEGORY_URLS", "").strip()
-    if env:
-        parts = re.split(r"[,\n]+", env)
-        urls = [p.strip() for p in parts if p.strip()]
-        if urls:
-            return urls
-
-    # デフォルト：fc2 カテゴリ
-    return [
-        "https://tktube.com/ja/categories/fc2/?page={page}",
-    ]
+SHEET_ID   = os.getenv("SHEET_ID", "").strip()
+SHEET_NAME = os.getenv("SHEET_NAME", "シート1").strip() or "シート1"
 
 
 def _now() -> float:
@@ -65,45 +49,13 @@ def _normalize_url(u: str) -> str:
     if not u:
         return u
     u = u.strip()
+    # 必要なら http→https 揃え
     u = re.sub(r"^http://", "https://", u, flags=re.I)
     return u.rstrip("/")
 
 
 # =========================
-#   mp4 → embed 変換
-# =========================
-
-# .../357435/357435_preview.mp4 の 357435 を抜くパターン
-EMBED_ID_RE = re.compile(r"/(\d+)_preview\.mp4", re.I)
-
-
-def preview_to_embed(preview_url: str) -> Optional[str]:
-    """
-    例:
-      https://pv.tkcdns.com/tk59/357000/357435/357435_preview.mp4
-        -> https://tktube.com/ja/embed/357435
-    """
-    if not preview_url:
-        return None
-
-    u = preview_url.strip()
-
-    m = EMBED_ID_RE.search(u)
-    if m:
-        vid = m.group(1)
-    else:
-        # 念のためフォールバック（/357435/xxx.mp4 みたいな形）
-        m2 = re.search(r"/(\d+)/[^/]*\.mp4", u)
-        if not m2:
-            return None
-        vid = m2.group(1)
-
-    base = BASE_ORIGIN or "https://tktube.com"
-    return f"{base}/ja/embed/{vid}"
-
-
-# =========================
-#   x.gd 短縮
+#  x.gd 短縮
 # =========================
 
 def shorten_via_xgd(long_url: str) -> str:
@@ -134,86 +86,127 @@ def shorten_via_xgd(long_url: str) -> str:
 
 
 # =========================
-#   一覧ページ → data-preview (.mp4) 抽出
+#  Google Sheets 周り
 # =========================
 
-def extract_preview_mp4_from_list(html: str) -> List[str]:
+def _open_worksheet():
     """
-    カテゴリ一覧ページの HTML から、
-    <img data-preview="...mp4"> の URL を全部抜く。
+    Service Account JSON（環境変数 GOOGLE_SERVICE_ACCOUNT_JSON）から
+    スプレッドシート(SHEET_ID, SHEET_NAME)を開く。
     """
-    if not html:
+    if not SHEET_ID:
+        print("[error] SHEET_ID is empty.")
+        return None
+
+    sa_raw = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON", "").strip()
+    if not sa_raw:
+        print("[error] GOOGLE_SERVICE_ACCOUNT_JSON is empty.")
+        return None
+
+    try:
+        sa = json.loads(sa_raw)
+    except Exception as e:
+        print(f"[error] failed to parse GOOGLE_SERVICE_ACCOUNT_JSON: {e}")
+        return None
+
+    scopes = [
+        "https://www.googleapis.com/auth/spreadsheets",
+        "https://www.googleapis.com/auth/drive",
+    ]
+
+    try:
+        creds = Credentials.from_service_account_info(sa, scopes=scopes)
+        gc = gspread.authorize(creds)
+        sh = gc.open_by_key(SHEET_ID)
+        ws = sh.worksheet(SHEET_NAME)
+    except Exception as e:
+        print(f"[error] failed to open sheet: {e}")
+        return None
+
+    return ws
+
+
+def _load_unposted_rows(ws) -> List[Tuple[int, str]]:
+    """
+    シート全体を読み、まだ投稿していない行を拾う。
+    - B列: 元の tktube 動画URL
+    - D列: 投稿日時（空なら「未投稿」とみなす）
+    戻り値: [(row_index, video_url), ...]
+    """
+    values = ws.get_all_values()
+    if not values:
         return []
 
-    soup = BeautifulSoup(html, "html.parser")
-    links: List[str] = []
-    seen: Set[str] = set()
+    results: List[Tuple[int, str]] = []
 
-    for img in soup.find_all("img"):
-        preview = img.get("data-preview")
-        if not preview:
+    for idx, row in enumerate(values, start=1):
+        if idx == 1:
+            # 1行目はヘッダ想定（「video_url」とか）
             continue
 
-        full = urljoin(BASE_ORIGIN, preview.strip())
-        full = _normalize_url(full)
+        # B列（インデックス1）
+        video_url = row[1].strip() if len(row) > 1 and row[1] else ""
+        # D列（インデックス3）
+        posted_at = row[3].strip() if len(row) > 3 and row[3] else ""
 
-        if ".mp4" not in full:
+        if not video_url:
+            continue
+        if posted_at:
+            # 既に投稿済み
+            continue
+        if "tktube.com" not in video_url:
             continue
 
-        if full not in seen:
-            seen.add(full)
-            links.append(full)
+        results.append((idx, video_url))
 
-    print(f"[debug] extract_preview_mp4_from_list: {len(links)} links")
-    return links
+    print(f"[info] sheet unposted rows: {len(results)}")
+    return results
 
 
-def _collect_tktube_preview_urls(num_pages: int, deadline_ts: Optional[float]) -> List[str]:
+def _mark_posted(ws, row_indices: List[int]):
     """
-    複数カテゴリURL × page=1..num_pages を回して、
-    data-preview の mp4 URL を集める。
+    指定された行の D 列に現在時刻(UTC)を書き込む。
     """
-    all_urls: List[str] = []
-    seen: Set[str] = set()
-    category_templates = _tktube_category_urls()
+    if not row_indices:
+        return
 
-    for tmpl in category_templates:
-        for page in range(1, num_pages + 1):
-            if _deadline_passed(deadline_ts):
-                print(f"[info] tktube deadline at {tmpl}, page={page}; stop.")
-                return all_urls[:RAW_LIMIT]
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
 
-            list_url = tmpl.format(page=page)
-            try:
-                resp = requests.get(list_url, headers=HEADERS, timeout=20)
-            except Exception as e:
-                print(f"[warn] tktube request failed: {list_url} ({e})")
-                continue
-
-            if resp.status_code != 200:
-                print(f"[warn] tktube status {resp.status_code}: {list_url}")
-                continue
-
-            html = resp.text
-            links = extract_preview_mp4_from_list(html)
-            print(f"[info] tktube list {list_url}: found {len(links)} preview links")
-
-            for u in links:
-                if u in seen:
-                    continue
-                seen.add(u)
-                all_urls.append(u)
-                if len(all_urls) >= RAW_LIMIT:
-                    print(f"[info] tktube early stop at RAW_LIMIT={RAW_LIMIT}")
-                    return all_urls[:RAW_LIMIT]
-
-            time.sleep(0.2)
-
-    return all_urls[:RAW_LIMIT]
+    # 1行ずつでも件数少ないのでOK（毎時5件程度）
+    for r in row_indices:
+        try:
+            ws.update_cell(r, 4, now)  # D列 = 4
+        except Exception as e:
+            print(f"[warn] failed to update D{r}: {e}")
 
 
 # =========================
-#   fetch_listing_pages（bot.py 互換）
+#  tktube 動画URL -> embed URL
+# =========================
+
+_VIDEO_RE = re.compile(
+    r"tktube\.com/(?:([a-z]{2})/)?videos/(\d+)/",
+    re.I,
+)
+
+
+def _video_url_to_embed(video_url: str) -> Optional[str]:
+    """
+    https://tktube.com/ja/videos/327760/... →
+    https://tktube.com/ja/embed/327760
+    """
+    m = _VIDEO_RE.search(video_url)
+    if not m:
+        return None
+
+    lang = (m.group(1) or "ja").lower()
+    vid = m.group(2)
+
+    return f"https://tktube.com/{lang}/embed/{vid}"
+
+
+# =========================
+#  旧 API 互換: fetch_listing_pages
 # =========================
 
 def fetch_listing_pages(
@@ -221,14 +214,16 @@ def fetch_listing_pages(
     deadline_ts: Optional[float] = None
 ) -> List[str]:
     """
-    旧 goxplorer のインターフェイス互換。
-    まずは data-preview mp4 URL リストを返す。
+    旧 goxplorer 用のダミー実装。
+    今回は「外部サイトから収集」ではなく、
+    スプレッドシートから読むのでここでは何もしない。
     """
-    return _collect_tktube_preview_urls(num_pages=num_pages, deadline_ts=deadline_ts)
+    # bot.py から呼ばれても差し支えないように空リストを返す。
+    return []
 
 
 # =========================
-#   collect_fresh_gofile_urls（bot.py から呼ばれる）
+#  メイン: collect_fresh_gofile_urls
 # =========================
 
 def collect_fresh_gofile_urls(
@@ -238,14 +233,16 @@ def collect_fresh_gofile_urls(
     deadline_sec: Optional[int] = None,
 ) -> List[str]:
     """
-    - tktube から data-preview の mp4 URL を集める
-    - そこから embed URL を生成：https://tktube.com/ja/embed/<id>
-    - state.json 由来の already_seen で重複を除外
-      （embed URL・短縮URL でチェック）
-    - x.gd で短縮
-    - want 件だけ返す
+    bot.py から呼び出されるメイン関数。
+    - シートのB列から tktube 動画URLを取得
+    - D列が空（未投稿）のものだけ対象
+    - embed URL に変換 → x.gd で短縮
+    - state.json の already_seen で重複も避ける
+    - 採用した行には D列に投稿時刻を書き込む
+    - 最終的に (短縮済みURL) を want 件まで返す
     """
 
+    # デッドラインは一応受け取るが、ほぼ関係なし
     if deadline_sec is None:
         _env = os.getenv("SCRAPE_TIMEOUT_SEC")
         try:
@@ -256,47 +253,59 @@ def collect_fresh_gofile_urls(
 
     deadline_ts = (_now() + deadline_sec) if deadline_sec else None
 
-    # 生の mp4 一覧
-    raw_urls = fetch_listing_pages(num_pages=num_pages, deadline_ts=deadline_ts)
+    ws = _open_worksheet()
+    if ws is None:
+        print("[error] cannot open Google Sheet; return empty list.")
+        return []
 
-    # 多すぎると時間がかかるので、まず FILTER_LIMIT 件に絞る
-    candidates = raw_urls[: max(1, FILTER_LIMIT)]
+    # シートからまだ投稿していない行を取得
+    candidates = _load_unposted_rows(ws)
 
     results: List[str] = []
     seen_now: Set[str] = set()
+    used_rows: List[int] = []
 
-    for preview_url in candidates:
+    for row_idx, video_url in candidates:
         if _deadline_passed(deadline_ts):
-            print("[info] deadline reached during filtering; stop.")
+            print("[info] deadline reached during sheet processing; stop.")
             break
 
-        embed_url = preview_to_embed(preview_url)
+        embed_url = _video_url_to_embed(video_url)
         if not embed_url:
-            # 万一パターンが取れなければ、従来通り preview を使う
-            embed_url = preview_url
+            print(f"[warn] cannot parse video url at row {row_idx}: {video_url}")
+            continue
 
         norm_embed = _normalize_url(embed_url)
 
-        # 同一 run 内の重複
+        # 同一run内
         if norm_embed in seen_now:
             continue
 
-        # 既に state.json に embed URL があるならスキップ
+        # state.json 側に既に存在するならスキップ
         if norm_embed in already_seen:
             continue
 
-        # x.gd で短縮（embed URL を短縮）
+        # x.gd で短縮
         short = shorten_via_xgd(embed_url)
         norm_short = _normalize_url(short)
 
-        # 短縮後 URL が既に state.json にあるならスキップ
+        # 短縮後 URL が state.json に既にあればスキップ
         if norm_short in already_seen:
             continue
 
         seen_now.add(norm_embed)
         results.append(short)
+        used_rows.append(row_idx)
+
+        print(f"[info] picked row {row_idx}: {video_url} -> {embed_url} -> {short}")
 
         if len(results) >= want:
             break
+
+    # D列に投稿日時を記録
+    try:
+        _mark_posted(ws, used_rows)
+    except Exception as e:
+        print(f"[warn] failed to mark posted rows: {e}")
 
     return results[:want]
