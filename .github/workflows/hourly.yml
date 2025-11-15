@@ -1,4 +1,4 @@
-name: Hourly Poster
+name: Hourly Poster (tktube)
 
 on:
   schedule:
@@ -37,37 +37,39 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      # === Googleスプレッドシート → X 投稿 bot ===
-      - name: Run bot (sheet → X)
-        id: sheet_bot
+      - name: Run bot (tktube)
+        id: tktube
         timeout-minutes: 10
         env:
-          # ★ スプレッドシート関連（全部 Secrets から）
+          # ===== Google Sheet =====
+          # すでに作ってある secret をそのまま使用
           SHEET_ID: ${{ secrets.SHEET_ID }}
-          SHEET_NAME: ${{ secrets.SHEET_NAME }}
+          SHEET_NAME: ${{ secrets.SHEET_NAME }}  # 例: "シート1"
           GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
 
-          # 投稿件数まわり（必要なら好きな値に変更OK）
-          WANT_POST: 5
-          MIN_POST: 3
-          USE_API_TIMELINE: 0
-          WAIT_ON_RATE_LIMIT: 0
-          HARD_LIMIT_SEC: 600
+          # ===== URL 変換ロジック =====
+          # goxplorer.py 側で tktubeモードとして扱うフラグ
+          SOURCE_KIND: "tktube"
 
-          # X(Twitter) API
+          # ===== 投稿件数 =====
+          WANT_POST: 5   # 1run で実際にツイートしたい件数
+          MIN_POST: 3    # これ未満しか集まらなかったら何も投稿しない＆シートも更新しない
+          USE_API_TIMELINE: 0
+
+          # ===== X(Twitter) =====
           X_API_KEY: ${{ secrets.X_API_KEY }}
           X_API_SECRET: ${{ secrets.X_API_SECRET }}
           X_ACCESS_TOKEN: ${{ secrets.X_ACCESS_TOKEN }}
           X_ACCESS_TOKEN_SECRET: ${{ secrets.X_ACCESS_TOKEN_SECRET }}
           X_SCREEN_NAME: ${{ vars.X_SCREEN_NAME }}
 
-          # x.gd API key（埋め込みURLを短縮する用）
+          # ===== x.gd API key =====
           XGD_API_KEY: ${{ secrets.XGD_API_KEY }}
 
         run: |
           set -e
-          python bot.py | tee bot_sheet.log
-          if grep -q "tweeted id=" bot_sheet.log; then
+          python bot.py | tee bot_tktube.log
+          if grep -q "tweeted id=" bot_tktube.log; then
             echo "posted=true" >> "$GITHUB_OUTPUT"
           else
             echo "posted=false" >> "$GITHUB_OUTPUT"
