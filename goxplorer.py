@@ -1,17 +1,20 @@
-# goxplorer.py — Google Sheet の /videos/URL から embed を作って x.gd で短縮する版
+# goxplorer.py — Google Sheet から URL を拾って短縮 → bot.py に返す 汎用版
 #
 # 想定シート構成（行方向）:
 #   行1: ヘッダ（中身は何でもOK）
 #   行2以降:
-#     B列 … tktube の動画URL (例: https://tktube.com/ja/videos/327760/fc2ppv-...)
+#     B列 … 元URL
+#       - SOURCE_KIND=tktube   のとき: https://tktube.com/ja/videos/327760/...
+#       - SOURCE_KIND=monsnode のとき: https://monsnode.com/twjn.php?v=21503421
 #     D列 … 投稿済み日時（空なら未投稿とみなす）
 #
 # 環境変数:
 #   SHEET_ID                    ... スプレッドシートID
-#   SHEET_NAME                  ... シート名（例: "シート1"）
-#   GOOGLE_SERVICE_ACCOUNT_JSON ... サービスアカウントのJSON文字列
+#   SHEET_NAME                  ... シート名（例: "シート1" or "シート2"）
+#   GOOGLE_SERVICE_ACCOUNT_JSON ... サービスアカウントJSON文字列
 #
-#   WANT_POST                   ... 1回でツイートしたい件数（bot.pyから引数としても渡される）
+#   SOURCE_KIND                 ... "tktube" / "monsnode"
+#   WANT_POST                   ... 1回でツイートしたい件数（bot.pyからも渡される）
 #   MIN_POST                    ... これ未満なら「ツイートしない & シート更新しない」
 #   XGD_API_KEY                 ... x.gd の API キー
 #
@@ -36,7 +39,7 @@ HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
         "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/123.0.0.0 Safari/537.36"
+        "Chrome/123.0.0.0 Safari/123.0.0.0"
     ),
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
     "Accept-Language": "ja-JP,ja;q=0.9,en-US;q=0.8,en;q=0.7",
@@ -46,6 +49,8 @@ HEADERS = {
 
 RAW_LIMIT    = int(os.getenv("RAW_LIMIT", "100"))
 FILTER_LIMIT = int(os.getenv("FILTER_LIMIT", "50"))
+
+SOURCE_KIND = os.getenv("SOURCE_KIND", "tktube").strip().lower()
 
 # tktube の /videos/, /video/ から ID を抜く
 VIDEO_ID_RE  = re.compile(r"https?://tktube\.com/(?:[a-z]{2}/)?videos/(\d+)/", re.I)
@@ -102,9 +107,9 @@ def shorten_via_xgd(long_url: str) -> str:
 
 def _open_sheet():
     """環境変数からサービスアカウントで Sheet を開く。失敗時は None."""
-    sheet_id  = os.getenv("SHEET_ID", "").strip()
+    sheet_id   = os.getenv("SHEET_ID", "").strip()
     sheet_name = os.getenv("SHEET_NAME", "").strip()
-    sa_json   = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON", "").strip()
+    sa_json    = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON", "").strip()
 
     if not sheet_id or not sheet_name or not sa_json:
         print("[error] SHEET_ID / SHEET_NAME / GOOGLE_SERVICE_ACCOUNT_JSON が足りません。")
@@ -131,7 +136,7 @@ def _open_sheet():
 def _sheet_get_unposted(max_rows: int) -> List[Tuple[int, str]]:
     """
     シートから「未投稿行」を最大 max_rows 件取り出す。
-    戻り値: [(row_index, video_url), ...]  （row_index は 1始まり）
+    戻り値: [(row_index, url_in_B), ...]  （row_index は 1始まり）
       - B列（index=1）に URL
       - D列（index=3）が空なら「未投稿」
     """
@@ -189,7 +194,6 @@ def _sheet_mark_posted(row_indices: List[int]) -> None:
 
     now_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
 
-    # 1件ずつ update_cell でも件数が少ないので問題なし
     for r in row_indices:
         try:
             ws.update_cell(r, 4, now_str)  # D列 = col 4
@@ -200,18 +204,43 @@ def _sheet_mark_posted(row_indices: List[int]) -> None:
 
 
 # =========================
-#   /videos/ URL → embed URL 変換
+#   URL 変換ロジック
 # =========================
 
 def _to_embed_url_from_video_url(video_url: str) -> Optional[str]:
     """
-    https://tktube.com/ja/videos/327760/... → https://tktube.com/ja/embed/327760
+    tktube 用:
+      https://tktube.com/ja/videos/327760/... → https://tktube.com/ja/embed/327760
     """
     m = VIDEO_ID_RE.search(video_url) or VIDEO_ID2_RE.search(video_url)
     if not m:
         return None
     vid = m.group(1)
     return f"https://tktube.com/ja/embed/{vid}"
+
+
+def _convert_sheet_url(sheet_url: str) -> Optional[str]:
+    """
+    シートの B列のURL -> 実際に短縮対象とする URL に変換する。
+      - SOURCE_KIND=tktube   : /videos → /embed に変換
+      - SOURCE_KIND=monsnode : そのまま（monsnode の twjn.php を想定）
+    """
+    u = sheet_url.strip()
+    if not u:
+        return None
+
+    if SOURCE_KIND == "tktube":
+        return _to_embed_url_from_video_url(u)
+
+    if SOURCE_KIND == "monsnode":
+        # 一応 monsnode っぽいものだけ通す
+        if "monsnode.com" not in u:
+            return None
+        # 正規化だけしてそのまま使う
+        return _normalize_url(u)
+
+    # デフォルトは「そのまま」
+    return _normalize_url(u)
 
 
 # =========================
@@ -223,21 +252,20 @@ def fetch_listing_pages(
     deadline_ts: Optional[float] = None,
 ) -> List[str]:
     """
-    互換のために残すダミー実装。
-    シート上の「未投稿行」から embed URL のリストを返すだけ。
-    state.json での重複チェックや短縮は collect_fresh_gofile_urls 側で行う。
+    bot.py 互換用のダミー実装。
+    シート上の「未投稿行」から URL のリストを返すだけ。
+    実際の重複除外・短縮などは collect_fresh_gofile_urls 側で行う。
     """
-    # num_pages / deadline_ts は未使用（インターフェイスだけ合わせる）
     max_rows = RAW_LIMIT
     rows = _sheet_get_unposted(max_rows=max_rows)
-    embeds: List[str] = []
+    urls: List[str] = []
 
     for _, sheet_url in rows:
-        embed = _to_embed_url_from_video_url(sheet_url)
-        if embed:
-            embeds.append(embed)
+        converted = _convert_sheet_url(sheet_url)
+        if converted:
+            urls.append(converted)
 
-    return embeds[:RAW_LIMIT]
+    return urls[:RAW_LIMIT]
 
 
 # =========================
@@ -247,13 +275,14 @@ def fetch_listing_pages(
 def collect_fresh_gofile_urls(
     already_seen: Set[str],
     want: int = 3,
-    num_pages: int = 100,          # 互換のためのダミー引数
-    deadline_sec: Optional[int] = None,  # 互換のためのダミー引数
+    num_pages: int = 100,               # 互換のためのダミー引数
+    deadline_sec: Optional[int] = None, # 互換のためのダミー引数
 ) -> List[str]:
     """
-    - Google Sheet の B列にある tktube /videos/ URL から embed URL を作る
-    - state.json 由来の already_seen で重複を除外
-      （元の embed URL・短縮後URL 両方をチェック）
+    - Google Sheet の B列にある URL を SOURCE_KIND に応じて変換
+      (tktube→embed, monsnode→そのまま) し、
+      state.json 由来の already_seen で重複を除外
+      （元URL・短縮後URL 両方をチェック）
     - x.gd で短縮
     - MIN_POST 未満ならシートも state.json も変更せず、 [] を返す
     - MIN_POST 以上あれば、使った行に D列で日付を入れて、want 件だけ返す
@@ -265,14 +294,12 @@ def collect_fresh_gofile_urls(
     except ValueError:
         min_post = 1
 
-    # シートから候補を取り出す件数
-    # （重複や already_seen を弾く余裕を持たせて want, min_post, FILTER_LIMIT の中で大きい方×2）
+    # シートから候補を取り出す件数（少し多めに取る）
     base = max(want, min_post, FILTER_LIMIT)
     max_rows = base * 2
 
     rows = _sheet_get_unposted(max_rows=max_rows)
     if not rows:
-        # ここまでで "[info] sheet unposted rows: 0" が出ている
         return []
 
     results: List[str] = []
@@ -280,23 +307,22 @@ def collect_fresh_gofile_urls(
     seen_now: Set[str] = set()
 
     for row_idx, sheet_url in rows:
-        # /videos/ URL → embed URL
-        embed_url = _to_embed_url_from_video_url(sheet_url)
-        if not embed_url:
+        target_url = _convert_sheet_url(sheet_url)
+        if not target_url:
             continue
 
-        norm_embed = _normalize_url(embed_url)
+        norm_target = _normalize_url(target_url)
 
         # この run 内での重複
-        if norm_embed in seen_now:
+        if norm_target in seen_now:
             continue
 
         # state.json（元URL）に既にあるならスキップ
-        if norm_embed in already_seen:
+        if norm_target in already_seen:
             continue
 
         # x.gd で短縮
-        short = shorten_via_xgd(embed_url)
+        short = shorten_via_xgd(target_url)
         norm_short = _normalize_url(short)
 
         # state.json（短縮URL）に既にあるならスキップ
@@ -304,22 +330,20 @@ def collect_fresh_gofile_urls(
             continue
 
         # 採用
-        seen_now.add(norm_embed)
+        seen_now.add(norm_target)
         used_rows.append(row_idx)
         results.append(short)
 
         if len(results) >= want:
             break
 
-    # ===== ここが重要: MIN_POST を満たさない場合は「何もなかった扱い」にする =====
+    # ===== MIN_POST を満たさない場合は「何もなかった扱い」 =====
     if len(results) < min_post:
         print(f"[info] only {len(results)} urls collected (< MIN_POST={min_post}); do not mark sheet.")
-        # シート更新もしない、state.json 側での「alive urls」も 0 と見なさせたいので空で返す
         return []
 
     # MIN_POST 以上集まった場合だけ「投稿済み」としてシートを更新
     if used_rows:
         _sheet_mark_posted(used_rows)
 
-    # 念のため want 件に丸めて返す（通常は len(results) <= want）
     return results[:want]
