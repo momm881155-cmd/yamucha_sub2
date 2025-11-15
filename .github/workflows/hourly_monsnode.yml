@@ -1,12 +1,4 @@
-name: Hourly Poster.stop (monsnode)
 
-
-
-
-on:
-  schedule:
-    - cron: "10 * * * *"   # tktube と時間をずらし 10分実行
-  workflow_dispatch: {}
 
 permissions:
   contents: write
