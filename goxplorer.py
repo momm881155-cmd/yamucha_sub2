@@ -1,8 +1,5 @@
-# goxplorer.py — tktube + Googleスプレッドシート専用版
-# - スプシB列の tktube 動画URL から embed URL を作成
-# - x.gd で短縮
-# - 使った行の D 列に投稿日時を書き込む
-# - bot.py からは collect_fresh_gofile_urls() だけ今まで通り呼べる
+# goxplorer.py — tktube embed 用：スプレッドシートの /videos/URL から
+# embed URL を組み立てて x.gd で短縮して返す版（scraping なし）
 
 import os
 import re
@@ -16,8 +13,11 @@ import gspread
 from google.oauth2.service_account import Credentials
 
 # =========================
-#  設定・共通ユーティリティ
+#   設定
 # =========================
+
+# tktube のベースURL（embed 生成に使用）
+BASE_ORIGIN = "https://tktube.com"
 
 HEADERS = {
     "User-Agent": (
@@ -27,14 +27,19 @@ HEADERS = {
     ),
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
     "Accept-Language": "ja-JP,ja;q=0.9,en-US;q=0.8,en;q=0.7",
+    "Referer": "https://tktube.com",
     "Connection": "keep-alive",
 }
 
-RAW_LIMIT    = int(os.getenv("RAW_LIMIT", "100"))   # 形式だけ残す（ほぼ未使用）
-FILTER_LIMIT = int(os.getenv("FILTER_LIMIT", "50")) # 同上
+RAW_LIMIT    = int(os.getenv("RAW_LIMIT", "100"))
+FILTER_LIMIT = int(os.getenv("FILTER_LIMIT", "50"))
 
+# Sheets 関連（環境変数から読む）
 SHEET_ID   = os.getenv("SHEET_ID", "").strip()
-SHEET_NAME = os.getenv("SHEET_NAME", "シート1").strip() or "シート1"
+SHEET_NAME = os.getenv("SHEET_NAME", "").strip() or "シート1"
+
+# /videos/123456/ や /video/123456/ から ID を拾う
+VIDEO_ID_RE = re.compile(r"/videos?/(\d+)/", re.I)
 
 
 def _now() -> float:
@@ -49,13 +54,12 @@ def _normalize_url(u: str) -> str:
     if not u:
         return u
     u = u.strip()
-    # 必要なら http→https 揃え
     u = re.sub(r"^http://", "https://", u, flags=re.I)
     return u.rstrip("/")
 
 
 # =========================
-#  x.gd 短縮
+#   x.gd 短縮
 # =========================
 
 def shorten_via_xgd(long_url: str) -> str:
@@ -86,127 +90,160 @@ def shorten_via_xgd(long_url: str) -> str:
 
 
 # =========================
-#  Google Sheets 周り
+#   Google Sheets ヘルパ
 # =========================
 
-def _open_worksheet():
+def _open_sheet():
     """
-    Service Account JSON（環境変数 GOOGLE_SERVICE_ACCOUNT_JSON）から
-    スプレッドシート(SHEET_ID, SHEET_NAME)を開く。
+    サービスアカウント JSON（環境変数）から認証し、
+    指定のシートを開いて Worksheet を返す。
     """
     if not SHEET_ID:
         print("[error] SHEET_ID is empty.")
         return None
 
-    sa_raw = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON", "").strip()
-    if not sa_raw:
+    raw_json = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON", "").strip()
+    if not raw_json:
         print("[error] GOOGLE_SERVICE_ACCOUNT_JSON is empty.")
         return None
 
     try:
-        sa = json.loads(sa_raw)
+        sa_info = json.loads(raw_json)
     except Exception as e:
-        print(f"[error] failed to parse GOOGLE_SERVICE_ACCOUNT_JSON: {e}")
+        print(f"[error] invalid GOOGLE_SERVICE_ACCOUNT_JSON: {e}")
         return None
 
-    scopes = [
-        "https://www.googleapis.com/auth/spreadsheets",
-        "https://www.googleapis.com/auth/drive",
-    ]
+    creds = Credentials.from_service_account_info(
+        sa_info,
+        scopes=[
+            "https://www.googleapis.com/auth/spreadsheets",
+            "https://www.googleapis.com/auth/drive",
+        ],
+    )
+
+    gc = gspread.authorize(creds)
 
     try:
-        creds = Credentials.from_service_account_info(sa, scopes=scopes)
-        gc = gspread.authorize(creds)
         sh = gc.open_by_key(SHEET_ID)
-        ws = sh.worksheet(SHEET_NAME)
     except Exception as e:
         print(f"[error] failed to open sheet: {e}")
+        return None
+
+    try:
+        ws = sh.worksheet(SHEET_NAME)
+    except gspread.WorksheetNotFound:
+        print(f"[error] worksheet '{SHEET_NAME}' not found in sheet {SHEET_ID}")
+        return None
+    except Exception as e:
+        print(f"[error] failed to open worksheet: {e}")
         return None
 
     return ws
 
 
-def _load_unposted_rows(ws) -> List[Tuple[int, str]]:
+def _extract_video_id(src: str) -> Optional[str]:
     """
-    シート全体を読み、まだ投稿していない行を拾う。
-    - B列: 元の tktube 動画URL
-    - D列: 投稿日時（空なら「未投稿」とみなす）
-    戻り値: [(row_index, video_url), ...]
+    スプレッドシートに入っている文字列から tktube の動画 ID を抽出する。
+    - フル URL: https://tktube.com/ja/videos/327760/xxx
+    - 省略 URL: https://tktube.com/videos/327760/
+    - 数字だけ: 327760
+    のどれでも OK。
     """
-    values = ws.get_all_values()
+    if not src:
+        return None
+
+    s = src.strip()
+
+    # 数字だけのケース
+    if s.isdigit():
+        return s
+
+    m = VIDEO_ID_RE.search(s)
+    if m:
+        return m.group(1)
+
+    return None
+
+
+def _make_embed_url(video_id: str) -> str:
+    """
+    動画 ID から embed URL を作る。
+    """
+    video_id = video_id.strip()
+    return f"{BASE_ORIGIN}/ja/embed/{video_id}"
+
+
+def _sheet_fetch_unposted_rows(max_count: int) -> Tuple[Optional[gspread.Worksheet], List[Tuple[int, str]]]:
+    """
+    シートから「まだ投稿していない行」を最大 max_count 行ぶん取得。
+    想定レイアウト:
+      - 1行目: ヘッダ
+      - 2行目以降:
+          B列: 動画 URL (https://tktube.com/ja/videos/123456/...)
+          D列: posted_at（空なら未投稿）
+    戻り値: (worksheet, [(row_index, video_url), ...])
+    """
+    ws = _open_sheet()
+    if ws is None:
+        print("[error] cannot open Google Sheet; return empty list.")
+        return None, []
+
+    try:
+        values = ws.get_all_values()
+    except Exception as e:
+        print(f"[error] ws.get_all_values failed: {e}")
+        return ws, []
+
     if not values:
-        return []
+        print("[info] sheet has no rows.")
+        return ws, []
 
     results: List[Tuple[int, str]] = []
 
-    for idx, row in enumerate(values, start=1):
-        if idx == 1:
-            # 1行目はヘッダ想定（「video_url」とか）
-            continue
-
-        # B列（インデックス1）
+    # 1行目はヘッダ扱いなのでスキップ
+    for idx, row in enumerate(values[1:], start=2):
+        # row[1] = B列, row[3] = D列 (0-based index)
         video_url = row[1].strip() if len(row) > 1 and row[1] else ""
-        # D列（インデックス3）
         posted_at = row[3].strip() if len(row) > 3 and row[3] else ""
 
         if not video_url:
             continue
         if posted_at:
-            # 既に投稿済み
-            continue
-        if "tktube.com" not in video_url:
+            # すでに投稿済み
             continue
 
         results.append((idx, video_url))
+        if len(results) >= max_count:
+            break
 
     print(f"[info] sheet unposted rows: {len(results)}")
-    return results
+    return ws, results
 
 
-def _mark_posted(ws, row_indices: List[int]):
+def _sheet_mark_posted(ws, row_indices: List[int]):
     """
-    指定された行の D 列に現在時刻(UTC)を書き込む。
+    指定された行番号の D 列に投稿日時（UTC）を書き込む。
     """
-    if not row_indices:
+    if not ws or not row_indices:
         return
 
-    now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+    now_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
 
-    # 1行ずつでも件数少ないのでOK（毎時5件程度）
+    # まとめてアップデート（負荷軽減）
+    cells = []
     for r in row_indices:
-        try:
-            ws.update_cell(r, 4, now)  # D列 = 4
-        except Exception as e:
-            print(f"[warn] failed to update D{r}: {e}")
+        # D列 = 4 列目
+        cells.append(gspread.cell.Cell(row=r, col=4, value=now_str))
+
+    try:
+        ws.update_cells(cells)
+        print(f"[info] sheet marked posted rows: {row_indices}")
+    except Exception as e:
+        print(f"[warn] failed to update posted_at in sheet: {e}")
 
 
 # =========================
-#  tktube 動画URL -> embed URL
-# =========================
-
-_VIDEO_RE = re.compile(
-    r"tktube\.com/(?:([a-z]{2})/)?videos/(\d+)/",
-    re.I,
-)
-
-
-def _video_url_to_embed(video_url: str) -> Optional[str]:
-    """
-    https://tktube.com/ja/videos/327760/... →
-    https://tktube.com/ja/embed/327760
-    """
-    m = _VIDEO_RE.search(video_url)
-    if not m:
-        return None
-
-    lang = (m.group(1) or "ja").lower()
-    vid = m.group(2)
-
-    return f"https://tktube.com/{lang}/embed/{vid}"
-
-
-# =========================
-#  旧 API 互換: fetch_listing_pages
+#   fetch_listing_pages（ダミー）
 # =========================
 
 def fetch_listing_pages(
@@ -214,16 +251,15 @@ def fetch_listing_pages(
     deadline_ts: Optional[float] = None
 ) -> List[str]:
     """
-    旧 goxplorer 用のダミー実装。
-    今回は「外部サイトから収集」ではなく、
-    スプレッドシートから読むのでここでは何もしない。
+    旧 goxplorer のインターフェイス互換だが、
+    今回は tktube からスクレイピングしないのでダミー実装。
+    実際の取得は collect_fresh_gofile_urls() の中でシートから行う。
     """
-    # bot.py から呼ばれても差し支えないように空リストを返す。
     return []
 
 
 # =========================
-#  メイン: collect_fresh_gofile_urls
+#   collect_fresh_gofile_urls（bot.py から呼ばれる）
 # =========================
 
 def collect_fresh_gofile_urls(
@@ -233,16 +269,13 @@ def collect_fresh_gofile_urls(
     deadline_sec: Optional[int] = None,
 ) -> List[str]:
     """
-    bot.py から呼び出されるメイン関数。
-    - シートのB列から tktube 動画URLを取得
-    - D列が空（未投稿）のものだけ対象
-    - embed URL に変換 → x.gd で短縮
-    - state.json の already_seen で重複も避ける
-    - 採用した行には D列に投稿時刻を書き込む
-    - 最終的に (短縮済みURL) を want 件まで返す
+    - Google スプレッドシートから「未投稿の /videos/... URL」を取り出す
+    - tktube の embed URL (https://tktube.com/ja/embed/<id>) に変換
+    - x.gd で短縮
+    - want 件だけ返す
+    - 投稿に使った行の D 列に投稿日時を書き込む
     """
 
-    # デッドラインは一応受け取るが、ほぼ関係なし
     if deadline_sec is None:
         _env = os.getenv("SCRAPE_TIMEOUT_SEC")
         try:
@@ -253,43 +286,38 @@ def collect_fresh_gofile_urls(
 
     deadline_ts = (_now() + deadline_sec) if deadline_sec else None
 
-    ws = _open_worksheet()
-    if ws is None:
-        print("[error] cannot open Google Sheet; return empty list.")
+    # シートから最大 RAW_LIMIT 件まで候補取得
+    ws, rows = _sheet_fetch_unposted_rows(max_count=RAW_LIMIT)
+    if not rows:
+        print("[info] no unposted rows in sheet.")
         return []
 
-    # シートからまだ投稿していない行を取得
-    candidates = _load_unposted_rows(ws)
-
     results: List[str] = []
-    seen_now: Set[str] = set()
     used_rows: List[int] = []
+    seen_now: Set[str] = set()
 
-    for row_idx, video_url in candidates:
+    for row_idx, src_url in rows:
         if _deadline_passed(deadline_ts):
-            print("[info] deadline reached during sheet processing; stop.")
+            print("[info] deadline reached during sheet filtering; stop.")
             break
 
-        embed_url = _video_url_to_embed(video_url)
-        if not embed_url:
-            print(f"[warn] cannot parse video url at row {row_idx}: {video_url}")
+        vid = _extract_video_id(src_url)
+        if not vid:
+            print(f"[warn] cannot extract video id from: {src_url}")
             continue
 
+        embed_url = _make_embed_url(vid)
         norm_embed = _normalize_url(embed_url)
 
-        # 同一run内
         if norm_embed in seen_now:
             continue
-
-        # state.json 側に既に存在するならスキップ
         if norm_embed in already_seen:
+            # state.json にも残したい場合はここで弾ける
             continue
 
-        # x.gd で短縮
         short = shorten_via_xgd(embed_url)
         norm_short = _normalize_url(short)
 
-        # 短縮後 URL が state.json に既にあればスキップ
         if norm_short in already_seen:
             continue
 
@@ -297,15 +325,11 @@ def collect_fresh_gofile_urls(
         results.append(short)
         used_rows.append(row_idx)
 
-        print(f"[info] picked row {row_idx}: {video_url} -> {embed_url} -> {short}")
-
         if len(results) >= want:
             break
 
-    # D列に投稿日時を記録
-    try:
-        _mark_posted(ws, used_rows)
-    except Exception as e:
-        print(f"[warn] failed to mark posted rows: {e}")
+    # シートに「投稿済み」の印を付ける
+    if ws and used_rows:
+        _sheet_mark_posted(ws, used_rows)
 
     return results[:want]
