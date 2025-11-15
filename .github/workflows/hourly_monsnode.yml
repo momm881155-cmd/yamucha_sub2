@@ -2,14 +2,14 @@ name: Hourly Poster (monsnode)
 
 on:
   schedule:
-    - cron: "30 * * * *"   # UTC 毎時30分（= JST 毎時 +30分）※ tktube と時間をずらす
+    - cron: "10 * * * *"   # tktube と時間をずらし 10分実行
   workflow_dispatch: {}
 
 permissions:
   contents: write
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: hourly_monsnode
   cancel-in-progress: true
 
 jobs:
@@ -17,6 +17,7 @@ jobs:
     runs-on: ubuntu-latest
     env:
       BRANCH_NAME: ${{ github.ref_name }}
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -41,27 +42,27 @@ jobs:
         id: monsnode
         timeout-minutes: 10
         env:
-          # Google Sheet (シート2を読む)
+          # ===== Google Sheet =====
           SHEET_ID: ${{ secrets.SHEET_ID }}
-          SHEET_NAME: ${{ secrets.SHEET_NAME_MONSNODE }}   # 例: "シート2"
+          SHEET_NAME: ${{ secrets.SHEET_NAME_MONSNODE }}
           GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
 
-          # monsnode モード
+          # ===== URL変換ロジック =====
           SOURCE_KIND: "monsnode"
 
-          # 投稿件数（tktube と同じでも、別でもよい）
+          # ===== 投稿件数 =====
           WANT_POST: 5
           MIN_POST: 3
           USE_API_TIMELINE: 0
 
-          # X(Twitter)
+          # ===== X(Twitter) =====
           X_API_KEY: ${{ secrets.X_API_KEY }}
           X_API_SECRET: ${{ secrets.X_API_SECRET }}
           X_ACCESS_TOKEN: ${{ secrets.X_ACCESS_TOKEN }}
           X_ACCESS_TOKEN_SECRET: ${{ secrets.X_ACCESS_TOKEN_SECRET }}
           X_SCREEN_NAME: ${{ vars.X_SCREEN_NAME }}
 
-          # x.gd API key
+          # ===== x.gd =====
           XGD_API_KEY: ${{ secrets.XGD_API_KEY }}
 
         run: |
