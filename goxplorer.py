@@ -16,7 +16,7 @@
 #   SOURCE_KIND                 ... "tktube" / "monsnode"
 #   WANT_POST                   ... 1回でツイートしたい件数（bot.pyからも渡される）
 #   MIN_POST                    ... これ未満なら「ツイートしない & シート更新しない」
-#   XGD_API_KEY                 ... x.gd の API キー
+#   XGD_API_KEY                 ... （※今は未使用。v.gd はキー不要）
 #
 # bot.py からは collect_fresh_gofile_urls() が呼ばれる想定。
 
@@ -71,33 +71,41 @@ def _normalize_url(u: str) -> str:
 
 
 # =========================
-#   x.gd 短縮
+#   v.gd 短縮
 # =========================
 
 def shorten_via_xgd(long_url: str) -> str:
     """
-    x.gd の API で URL を短縮。
+    v.gd の API で URL を短縮。
     失敗したら元 URL をそのまま返す。
     """
-    api_key = os.getenv("XGD_API_KEY", "").strip()
-    if not api_key:
-        return long_url
-
     try:
         r = requests.get(
-            "https://xgd.io/V1/shorten",
-            params={"url": long_url, "key": api_key},
+            "https://v.gd/create.php",
+            params={
+                "format": "simple",  # 短縮URLのみのテキストが返る
+                "url": long_url,
+            },
             headers=HEADERS,
             timeout=10,
         )
         r.raise_for_status()
-        data = r.json()
-        short = (data.get("shorturl") or data.get("short_url") or "").strip()
-        if short:
-            return short
-    except Exception as e:
-        print(f"[warn] x.gd shorten failed for {long_url}: {e}")
+        short = (r.text or "").strip()
 
+        # v.gd が http で返してきた場合は https に揃える
+        if short.startswith("http://"):
+            short = "https://" + short[len("http://"):]
+
+        # 想定通りの形式か軽くチェック
+        if short.startswith("https://v.gd/"):
+            return short
+        else:
+            print(f"[warn] v.gd unexpected response for {long_url}: {short}")
+
+    except Exception as e:
+        print(f"[warn] v.gd shorten failed for {long_url}: {e}")
+
+    # 失敗したときは元URLをそのまま使う
     return long_url
 
 
@@ -283,7 +291,7 @@ def collect_fresh_gofile_urls(
       (tktube→embed, monsnode→そのまま) し、
       state.json 由来の already_seen で重複を除外
       （元URL・短縮後URL 両方をチェック）
-    - x.gd で短縮
+    - v.gd で短縮
     - MIN_POST 未満ならシートも state.json も変更せず、 [] を返す
     - MIN_POST 以上あれば、使った行に D列で日付を入れて、want 件だけ返す
     """
@@ -321,7 +329,7 @@ def collect_fresh_gofile_urls(
         if norm_target in already_seen:
             continue
 
-        # x.gd で短縮
+        # v.gd で短縮
         short = shorten_via_xgd(target_url)
         norm_short = _normalize_url(short)
 
@@ -346,4 +354,4 @@ def collect_fresh_gofile_urls(
     if used_rows:
         _sheet_mark_posted(used_rows)
 
-    return results[:want]
+    return results[:want] 
