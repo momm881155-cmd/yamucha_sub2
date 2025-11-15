@@ -1,15 +1,15 @@
-# goxplorer2.py — orevideo.pythonanywhere.com 専用スクレイパー
+# goxplorer2.py — orevideo 専用スクレイパ
 #
-# 役割:
-#   - orevideo の一覧ページ (?sort=newest&page=N) を巡回
-#   - data-video-url="https://video.twimg.com/....mp4?tag=14" を回収
-#     → v.gd で短縮して返す
-#   - HTML 内に出てくる https://gofile.io/d/XXXXXX を回収
-#     → 生URLのまま返す（短縮しない）
-#   - state.json 由来の already_seen と、この run 内の重複を排除
-#   - WANT_POST / MIN_POST / RAW_LIMIT / FILTER_LIMIT で制御
-#
-# bot_orevideo.py から collect_fresh_gofile_urls() が呼ばれる想定
+# ・https://orevideo.pythonanywhere.com/?sort=newest&page=N から
+#   - https://video.twimg.com/...mp4?tag=xx  （twimg）
+#   - https://gofile.io/d/XXXXXX             （gofile）
+#   を収集
+# ・gofile はページ 1〜10 を優先（それ以降は控え）
+# ・collect_fresh_gofile_urls() で
+#   - gofile 最大 3 本
+#   - 残り twimg で埋めて WANT_POST 本（デフォ5）
+# ・twimg だけ v.gd で短縮、gofile は生URLのまま
+# ・state.json の posted_urls / recent_urls_24h を使って重複除外
 
 import os
 import re
@@ -17,16 +17,12 @@ import time
 from typing import List, Set, Optional, Tuple
 
 import requests
-from bs4 import BeautifulSoup
 
 # =========================
 #   設定
 # =========================
 
-BASE_LIST_URL = os.getenv(
-    "ORE_BASE_URL",
-    "https://orevideo.pythonanywhere.com"
-).rstrip("/")
+BASE_ORIGIN = os.getenv("OREVIDEO_BASE", "https://orevideo.pythonanywhere.com").rstrip("/")
 
 HEADERS = {
     "User-Agent": (
@@ -36,14 +32,21 @@ HEADERS = {
     ),
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
     "Accept-Language": "ja-JP,ja;q=0.9,en-US;q=0.8,en;q=0.7",
-    "Referer": "https://orevideo.pythonanywhere.com",
+    "Referer": BASE_ORIGIN,
     "Connection": "keep-alive",
 }
 
-RAW_LIMIT    = int(os.getenv("RAW_LIMIT", "200"))
-FILTER_LIMIT = int(os.getenv("FILTER_LIMIT", "80"))  # 候補数の頭打ち用
+RAW_LIMIT    = int(os.getenv("RAW_LIMIT", "200"))  # orevideo 用は 200 で十分
+FILTER_LIMIT = int(os.getenv("FILTER_LIMIT", "80"))
 
-# gofile 検出用
+# gofile を何本狙うか（デフォ 3）
+GOFILE_TARGET = int(os.getenv("GOFILE_TARGET", "3"))
+
+# gofile を「優先」する最大ページ
+GOFILE_PRIORITY_MAX_PAGE = int(os.getenv("GOFILE_PRIORITY_MAX_PAGE", "10"))
+
+# twimg / gofile 抽出用
+TWIMG_RE  = re.compile(r"https?://video\.twimg\.com/[^\s\"']+?\.mp4\?tag=\d+", re.I)
 GOFILE_RE = re.compile(r"https?://gofile\.io/d/[A-Za-z0-9]+", re.I)
 
 
@@ -56,9 +59,6 @@ def _deadline_passed(deadline_ts: Optional[float]) -> bool:
 
 
 def _normalize_url(u: str) -> str:
-    """
-    state.json と同じ形で比較できるように http→https & 末尾 / 削り
-    """
     if not u:
         return u
     u = u.strip()
@@ -67,7 +67,7 @@ def _normalize_url(u: str) -> str:
 
 
 # =========================
-#   v.gd 短縮
+#   v.gd 短縮（twimg 用）
 # =========================
 
 def shorten_via_vgd(long_url: str) -> str:
@@ -83,145 +83,116 @@ def shorten_via_vgd(long_url: str) -> str:
             timeout=10,
         )
         r.raise_for_status()
-        short = r.text.strip()
-        # v.gd は短縮成功時に http(s) から始まる URL を返す
-        if short.lower().startswith("http"):
+        short = (r.text or "").strip()
+        if short.startswith("http"):
             return short
     except Exception as e:
         print(f"[warn] v.gd shorten failed for {long_url}: {e}")
-
     return long_url
 
 
 # =========================
-#   一覧ページ URL 生成
-# =========================
-
-def _ore_listing_urls(num_pages: int) -> List[str]:
-    """
-    https://orevideo.pythonanywhere.com/?sort=newest&page=1
-    https://orevideo.pythonanywhere.com/?page=2&sort=newest
-    みたいな URL を 1..num_pages ぶん作る
-    """
-    urls: List[str] = []
-    base = BASE_LIST_URL
-
-    for page in range(1, num_pages + 1):
-        if page == 1:
-            url = f"{base}/?sort=newest&page=1"
-        else:
-            url = f"{base}/?page={page}&sort=newest"
-        urls.append(url)
-
-    return urls
-
-
-# =========================
-#   HTML → twimg / gofile 抜き出し
+#   HTML からリンク抽出
 # =========================
 
 def extract_links_from_html(html: str) -> Tuple[List[str], List[str]]:
     """
-    orevideo の HTML から:
-      - data-video-url="https://video.twimg.com/...mp4?tag=14" を抽出
-      - https://gofile.io/d/XXXXXX を抽出
+    orevideo のページ HTML から
+      - twimg mp4
+      - gofile
+    を抜き出す。
     戻り値: (twimg_list, gofile_list)
     """
     if not html:
         return [], []
 
-    soup = BeautifulSoup(html, "html.parser")
+    tw = TWIMG_RE.findall(html)
+    gf = GOFILE_RE.findall(html)
 
-    twimg_links: List[str] = []
-    gofile_links: List[str] = []
+    # ページ内での重複排除（順序維持）
+    def unique(seq: List[str]) -> List[str]:
+        seen = set()
+        out = []
+        for s in seq:
+            s = s.strip()
+            if not s:
+                continue
+            if s in seen:
+                continue
+            seen.add(s)
+            out.append(s)
+        return out
 
-    seen_twimg: Set[str] = set()
-    seen_gofile: Set[str] = set()
+    tw_u = unique(tw)
+    gf_u = unique(gf)
 
-    # data-video-url="https://video.twimg.com/..."
-    for li in soup.find_all("li", attrs={"data-video-url": True}):
-        u = li.get("data-video-url", "").strip()
-        if not u:
-            continue
-        if "video.twimg.com" not in u:
-            continue
-        if ".mp4" not in u:
-            continue
-
-        full = _normalize_url(u)
-        if full in seen_twimg:
-            continue
-        seen_twimg.add(full)
-        twimg_links.append(full)
-
-    # HTML 全体から gofile.io/d/XXXXXX を正規表現で拾う
-    for m in GOFILE_RE.finditer(html):
-        u = _normalize_url(m.group(0))
-        if u in seen_gofile:
-            continue
-        seen_gofile.add(u)
-        gofile_links.append(u)
-
-    print(
-        f"[debug] extract_links_from_html: twimg={len(twimg_links)}, "
-        f"gofile={len(gofile_links)}"
-    )
-    return twimg_links, gofile_links
+    print(f"[debug] extract_links_from_html: twimg={len(tw_u)}, gofile={len(gf_u)}")
+    return tw_u, gf_u
 
 
 # =========================
-#   orevideo → URL 一覧収集
+#   orevideo からリンク収集
 # =========================
 
-def _collect_orevideo_urls(num_pages: int, deadline_ts: Optional[float]) -> List[str]:
+def _collect_orevideo_links(
+    num_pages: int,
+    deadline_ts: Optional[float],
+) -> Tuple[List[str], List[str], List[str]]:
     """
-    orevideo の複数ページを回して、twimg + gofile の URL を集める。
+    orevideo のページを 1..num_pages まで巡回してリンクを集める。
+    戻り値: (twimg_all, gofile_early, gofile_late)
+      - gofile_early … page <= GOFILE_PRIORITY_MAX_PAGE の gofile
+      - gofile_late  … page >  GOFILE_PRIORITY_MAX_PAGE の gofile
     """
-    all_urls: List[str] = []
-    seen: Set[str] = set()
+    twimg_all: List[str] = []
+    gofile_early: List[str] = []
+    gofile_late: List[str] = []
 
-    listing_urls = _ore_listing_urls(num_pages=num_pages)
+    total_raw = 0
 
-    for list_url in listing_urls:
+    for p in range(1, num_pages + 1):
         if _deadline_passed(deadline_ts):
-            print(f"[info] orevideo deadline at {list_url}; stop.")
+            print(f"[info] orevideo deadline at page={p}; stop.")
             break
 
+        if p == 1:
+            url = f"{BASE_ORIGIN}/?sort=newest&page=1"
+        else:
+            url = f"{BASE_ORIGIN}/?page={p}&sort=newest"
+
         try:
-            resp = requests.get(list_url, headers=HEADERS, timeout=20)
+            resp = requests.get(url, headers=HEADERS, timeout=20)
         except Exception as e:
-            print(f"[warn] orevideo request failed: {list_url} ({e})")
+            print(f"[warn] orevideo request failed: {url} ({e})")
             continue
 
         if resp.status_code != 200:
-            print(f"[warn] orevideo status {resp.status_code}: {list_url}")
+            print(f"[warn] orevideo status {resp.status_code}: {url}")
             continue
 
         html = resp.text
-        twimg_links, gofile_links = extract_links_from_html(html)
+        tw_list, gf_list = extract_links_from_html(html)
+        print(f"[info] orevideo list {url}: twimg={len(tw_list)}, gofile={len(gf_list)}")
 
-        print(
-            f"[info] orevideo list {list_url}: "
-            f"twimg={len(twimg_links)}, gofile={len(gofile_links)}"
-        )
+        twimg_all.extend(tw_list)
 
-        # まずは twimg, そのあと gofile を同一リストに詰めていく
-        for u in twimg_links + gofile_links:
-            if u in seen:
-                continue
-            seen.add(u)
-            all_urls.append(u)
-            if len(all_urls) >= RAW_LIMIT:
-                print(f"[info] orevideo early stop at RAW_LIMIT={RAW_LIMIT}")
-                return all_urls[:RAW_LIMIT]
+        if p <= GOFILE_PRIORITY_MAX_PAGE:
+            gofile_early.extend(gf_list)
+        else:
+            gofile_late.extend(gf_list)
+
+        total_raw = len(twimg_all) + len(gofile_early) + len(gofile_late)
+        if total_raw >= RAW_LIMIT:
+            print(f"[info] orevideo early stop at RAW_LIMIT={RAW_LIMIT}")
+            break
 
         time.sleep(0.3)
 
-    return all_urls[:RAW_LIMIT]
+    return twimg_all, gofile_early, gofile_late
 
 
 # =========================
-#   fetch_listing_pages（bot.py 互換）
+#   fetch_listing_pages（互換用／実際はあまり使わない）
 # =========================
 
 def fetch_listing_pages(
@@ -229,28 +200,36 @@ def fetch_listing_pages(
     deadline_ts: Optional[float] = None,
 ) -> List[str]:
     """
-    旧 goxplorer との互換のためのラッパ。
-    orevideo の twimg + gofile URL をまとめて返す。
+    bot.py 互換用のダミー実装。
+    実際の URL 選別は collect_fresh_gofile_urls 側で行うため、
+    ここでは twimg + gofile を全部まとめて返すだけ。
     """
-    return _collect_orevideo_urls(num_pages=num_pages, deadline_ts=deadline_ts)
+    tw, gf_early, gf_late = _collect_orevideo_links(num_pages=num_pages, deadline_ts=deadline_ts)
+    all_urls = tw + gf_early + gf_late
+    return all_urls[:RAW_LIMIT]
 
 
 # =========================
-#   collect_fresh_gofile_urls（bot_orevideo.py から呼ばれる）
+#   collect_fresh_gofile_urls（bot.py から呼ばれるメイン）
 # =========================
 
 def collect_fresh_gofile_urls(
     already_seen: Set[str],
-    want: int = 3,
-    num_pages: int = 100,
+    want: int = 5,
+    num_pages: int = 50,
     deadline_sec: Optional[int] = None,
 ) -> List[str]:
     """
-    - orevideo から twimg (mp4) + gofile の URL を集める
-    - state.json 由来の already_seen で重複を除外
-      （元URL・短縮後URL 両方をチェック）
-    - twimg → v.gd で短縮 / gofile → 生URL
-    - want 件だけ返す（MIN_POST 未満なら []）
+    orevideo 用の URL 選別ロジック。
+
+    - orevideo から twimg / gofile を収集
+    - gofile はページ 1〜GOFILE_PRIORITY_MAX_PAGE のものを優先
+    - 1ツイートあたり:
+        gofile : 最大 GOFILE_TARGET 本
+        twimg  : 残りを埋めて合計 want 本
+    - twimg だけ v.gd で短縮、gofile は生URLのまま
+    - already_seen / このrun内の seen_now で重複を避ける
+    - MIN_POST 未満なら [] を返す（bot.py 側でツイートしない）
     """
 
     # MIN_POST を環境変数から取得（パースできなければ 1）
@@ -259,63 +238,111 @@ def collect_fresh_gofile_urls(
     except ValueError:
         min_post = 1
 
-    # 締切時間
+    # デッドライン設定
     if deadline_sec is None:
-        _env = os.getenv("SCRAPE_TIMEOUT_SEC")
+        env = os.getenv("SCRAPE_TIMEOUT_SEC")
         try:
-            if _env:
-                deadline_sec = int(_env)
+            if env:
+                deadline_sec = int(env)
         except Exception:
             deadline_sec = None
 
     deadline_ts = (_now() + deadline_sec) if deadline_sec else None
 
-    # 生の候補 URL 一覧
-    raw_urls = fetch_listing_pages(num_pages=num_pages, deadline_ts=deadline_ts)
+    # orevideo から raw リンク収集
+    tw_all, gf_early, gf_late = _collect_orevideo_links(num_pages=num_pages, deadline_ts=deadline_ts)
 
-    # 多すぎると時間がかかるので、まず FILTER_LIMIT 件に絞る
-    candidates = raw_urls[: max(1, FILTER_LIMIT)]
+    # 目標本数
+    go_target = min(GOFILE_TARGET, want)
+    # 残りは twimg で埋める
+    tw_target = max(0, want - go_target)
 
     results: List[str] = []
+    selected_gofile: List[str] = []
+    selected_twimg: List[str] = []
     seen_now: Set[str] = set()
 
-    for url in candidates:
-        if _deadline_passed(deadline_ts):
-            print("[info] deadline reached during filtering; stop.")
-            break
+    def pick_url(raw_url: str, kind: str) -> str | None:
+        """
+        kind = "gofile" or "twimg"
+        - gofile: 生URLをそのまま使う
+        - twimg:  v.gd で短縮した URL を使う
+        """
+        if not raw_url:
+            return None
 
-        norm_orig = _normalize_url(url)
+        raw_norm = _normalize_url(raw_url)
 
-        # この run 内での重複
-        if norm_orig in seen_now:
-            continue
+        # gofile は state.json にも生URLで保存されるので、そのままチェック
+        # twimg は短縮後のURLで state.json に保存されるので、
+        #   - 生URLがたまたま入っているケースも考えて一応見る
+        if raw_norm in already_seen:
+            return None
 
-        # state.json（元URL）に既にあるならスキップ
-        if norm_orig in already_seen:
-            continue
-
-        # 種別ごとに短縮有無を分ける
-        if norm_orig.startswith("https://gofile.io/d/"):
-            short = url  # gofile は短縮せず生URL
+        if kind == "twimg":
+            final = shorten_via_vgd(raw_url)
         else:
-            # それ以外（主に twimg mp4）は v.gd で短縮
-            short = shorten_via_vgd(url)
+            final = raw_url
 
-        norm_short = _normalize_url(short)
+        final_norm = _normalize_url(final)
 
-        # state.json（短縮URL）に既にあるならスキップ
-        if norm_short in already_seen:
-            continue
+        # この run 内の重複 + state.json の重複
+        if final_norm in seen_now or final_norm in already_seen:
+            return None
 
-        seen_now.add(norm_orig)
-        results.append(short)
+        seen_now.add(final_norm)
+        return final
 
-        if len(results) >= want:
+    # 1) gofile (優先ページ 1〜GOFILE_PRIORITY_MAX_PAGE)
+    for url in gf_early:
+        if len(selected_gofile) >= go_target:
             break
+        if _deadline_passed(deadline_ts):
+            print("[info] deadline reached during gofile-early selection; stop.")
+            break
+        pick = pick_url(url, kind="gofile")
+        if pick:
+            selected_gofile.append(pick)
 
-    # MIN_POST 未満なら「何もなかった扱い」
+    # 2) gofile (残りはそれ以降のページから)
+    if len(selected_gofile) < go_target:
+        for url in gf_late:
+            if len(selected_gofile) >= go_target:
+                break
+            if _deadline_passed(deadline_ts):
+                print("[info] deadline reached during gofile-late selection; stop.")
+                break
+            pick = pick_url(url, kind="gofile")
+            if pick:
+                selected_gofile.append(pick)
+
+    # 現時点での gofile 本数
+    current_go = len(selected_gofile)
+
+    # twimg で埋めるべき残り本数
+    remaining = max(0, want - current_go)
+
+    # 3) twimg （全ページから）
+    for url in tw_all:
+        if len(selected_twimg) >= remaining:
+            break
+        if _deadline_passed(deadline_ts):
+            print("[info] deadline reached during twimg selection; stop.")
+            break
+        pick = pick_url(url, kind="twimg")
+        if pick:
+            selected_twimg.append(pick)
+
+    results = selected_gofile + selected_twimg
+
+    print(
+        f"[info] orevideo selected: gofile={len(selected_gofile)}, "
+        f"twimg={len(selected_twimg)}, total={len(results)} (target={want})"
+    )
+
+    # MIN_POST 未満なら「何も無かった扱い」
     if len(results) < min_post:
-        print(f"[info] only {len(results)} urls collected (< MIN_POST={min_post}); skip.")
+        print(f"[info] only {len(results)} urls collected (< MIN_POST={min_post}); return [].")
         return []
 
     return results[:want]
