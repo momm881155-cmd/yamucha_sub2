@@ -37,28 +37,29 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Install Playwright browsers (Chromium)
-        run: |
-          python -m playwright install --with-deps chromium
-
-      # === tktube 専用 ===
+      # === tktube + Google Sheets 専用 ===
       - name: Run bot (tktube)
         id: tktube
         timeout-minutes: 10
         env:
-          # ★ tktube 固定
+          # tktube 用（今は実質使ってないが残しておいてもOK）
           BASE_ORIGIN: "https://tktube.com"
 
-          # ここに欲しいカテゴリ一覧（複数行OK）
-          # {page} は 1..NUM_PAGES に展開される
-          TKTUBE_CATEGORY_URLS: |
-            https://tktube.com/ja/categories/fc2/?page={page}
-
-          # 収集設定
+          # 収集設定（goxplorer 側ではほぼ未使用だが互換のため残す）
           SCRAPE_TIMEOUT_SEC: 240
           RAW_LIMIT: 100
           FILTER_LIMIT: 50
           NUM_PAGES: 3
+
+          # ★★★ Google Sheets 関連 ★★★
+          # スプレッドシートID（URLの /d/ と /edit の間）
+          SHEET_ID: "ここにスプレッドシートIDを入れる"
+
+          # シート名（タブ名）
+          SHEET_NAME: "シート1"  # 実際のタブ名に合わせて変更してOK
+
+          # Service Account JSON（GitHub Secrets に入れたやつ）
+          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
 
           # 投稿件数
           WANT_POST: 5
