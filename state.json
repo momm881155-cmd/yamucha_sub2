@@ -141,10 +141,15 @@
     "https://x.gd/9k2g8",
     "https://x.gd/kfWRr",
     "https://x.gd/DGuXx",
-    "https://x.gd/SLBfa"
+    "https://x.gd/SLBfa",
+    "https://v.gd/xgEdWE",
+    "https://v.gd/dilRjQ",
+    "https://v.gd/fczohb",
+    "https://v.gd/ypIidD",
+    "https://v.gd/tEFbQ7"
   ],
   "last_post_date": "2025-11-15",
-  "posts_today": 7,
+  "posts_today": 8,
   "recent_urls_24h": [
     {
       "url": "https://x.gd/5bOJe",
@@ -285,7 +290,27 @@
     {
       "url": "https://x.gd/SLBfa",
       "ts": "2025-11-15T07:25:55.977538+00:00"
+    },
+    {
+      "url": "https://v.gd/xgEdWE",
+      "ts": "2025-11-15T08:23:37.906421+00:00"
+    },
+    {
+      "url": "https://v.gd/dilRjQ",
+      "ts": "2025-11-15T08:23:37.906421+00:00"
+    },
+    {
+      "url": "https://v.gd/fczohb",
+      "ts": "2025-11-15T08:23:37.906421+00:00"
+    },
+    {
+      "url": "https://v.gd/ypIidD",
+      "ts": "2025-11-15T08:23:37.906421+00:00"
+    },
+    {
+      "url": "https://v.gd/tEFbQ7",
+      "ts": "2025-11-15T08:23:37.906421+00:00"
     }
   ],
-  "line_seq": 475
+  "line_seq": 480
 }
