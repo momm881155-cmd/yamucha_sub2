@@ -1,30 +1,28 @@
-# goxplorer2.py — orevideo 専用スクレイパ（短縮なし版＋Playwrightでgofileチェック）
+# goxplorer2.py — orevideo 専用スクレイパ（生URL版 / gofile生存チェック付き）
 #
 # ・https://orevideo.pythonanywhere.com/?sort=newest&page=N から
-#   - https://video.twimg.com/...mp4?tag=xx  （twimg / 生URL）
-#   - https://gofile.io/d/XXXXXX             （gofile / 生URL）
+#   - https://video.twimg.com/...mp4?tag=xx  （twimg）
+#   - https://gofile.io/d/XXXXXX             （gofile）
 #   を収集
 #
-# ・gofile は「新しいものを優先」
-#   - orevideo の page=1 が一番新しい → page=1 から順に拾う
-#   - GOFILE_PRIORITY_MAX_PAGE までは「優先バケット」（デフォルト 10）
-#   - それ以降のページも含めて、最大 NUM_PAGES まで巡回
+# ・ロジック概要
+#   1. orevideo から twimg / gofile をまとめて収集
+#   2. gofile は state.json 由来 already_seen で重複を事前に除外
+#   3. 残った gofile のうち最大 MAX_GOFILE_CHECKS_PER_RUN 本だけ生存確認
+#        - 生きてる gofile が GOFILE_TARGET 本 集まったら即打ち切り
+#   4. gofile が GOFILE_TARGET 未満なら、残りは twimg で埋めて WANT_POST 本にする
+#   5. twimg / gofile ともに生URLのまま bot.py に渡す（短縮しない）
 #
-# ・1ツイートにつき:
-#   - gofile : 最大 GOFILE_TARGET 本（デフォルト 5）
-#   - twimg  : 残りを埋めて合計 WANT_POST 本（bot_orevideo側の env）
+# ・環境変数
+#   RAW_LIMIT                  ... orevideo から拾う最大URL数（twimg+gofile）
+#   FILTER_LIMIT               ... （今回は主に内部計算用）
+#   NUM_PAGES                  ... orevideo を何ページまで見るか（デフォ 50）
+#   GOFILE_TARGET              ... 1ツイート中の gofile 最大本数（デフォ 5）
+#   MAX_GOFILE_CHECKS_PER_RUN  ... 1run中に「生存確認リクエスト」を行う最大本数（デフォ 15）
+#   MIN_POST                   ... これ未満なら [] を返してツイートしない
+#   SCRAPE_TIMEOUT_SEC         ... 全体の締切（秒）
 #
-# ・gofile は投稿前にリンク切れチェック:
-#   - まず requests でステータス確認
-#   - その後 Playwright(Chromium) で実際にページを開き、
-#     Bodyテキストに以下の文言が出ていたらリンク切れ扱い:
-#       "This content does not exist"
-#       "The content you are looking for could not be found"
-#
-# ・twimg / gofile ともに短縮なし（生URLのまま）
-# ・state.json（posted_urls / recent_urls_24h）で重複を除外
-#
-# bot_orevideo.py から collect_fresh_gofile_urls() が呼ばれる想定。
+# ・bot.py 側からは collect_fresh_gofile_urls() が呼ばれる想定。
 
 import os
 import re
@@ -32,7 +30,6 @@ import time
 from typing import List, Set, Optional, Tuple
 
 import requests
-from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
 
 # =========================
 #   設定
@@ -55,21 +52,15 @@ HEADERS = {
 RAW_LIMIT    = int(os.getenv("RAW_LIMIT", "200"))
 FILTER_LIMIT = int(os.getenv("FILTER_LIMIT", "80"))
 
-# 1ツイート内で狙う gofile 本数（不足分は twimg で補充）
+# gofile を狙う最大本数（デフォ 5 = WANT_POST と同じ想定）
 GOFILE_TARGET = int(os.getenv("GOFILE_TARGET", "5"))
 
-# gofile を「優先」する最大ページ（1ページ目に近いほど新しい想定）
-GOFILE_PRIORITY_MAX_PAGE = int(os.getenv("GOFILE_PRIORITY_MAX_PAGE", "10"))
+# 1 run で「生存確認(API叩く)」を行う上限本数
+MAX_GOFILE_CHECKS_PER_RUN = int(os.getenv("MAX_GOFILE_CHECKS_PER_RUN", "15"))
 
 # twimg / gofile 抽出用
 TWIMG_RE  = re.compile(r"https?://video\.twimg\.com/[^\s\"']+?\.mp4\?tag=\d+", re.I)
 GOFILE_RE = re.compile(r"https?://gofile\.io/d/[A-Za-z0-9]+", re.I)
-
-# gofile の「コンテンツ無し」判定用フレーズ
-GOFILE_NOT_FOUND_MARKERS = [
-    "this content does not exist",
-    "the content you are looking for could not be found",
-]
 
 
 def _now() -> float:
@@ -86,87 +77,6 @@ def _normalize_url(u: str) -> str:
     u = u.strip()
     u = re.sub(r"^http://", "https://", u, flags=re.I)
     return u.rstrip("/")
-
-
-# =========================
-#   gofile 生存チェック（requests + Playwright）
-# =========================
-
-def is_gofile_alive(url: str) -> bool:
-    """
-    gofile のページに実際にアクセスして、生存判定を行う。
-
-    1. requests でステータス確認
-       - 4xx / 5xx → リンク切れ扱い
-       - HTML内に「Not Found」系メッセージがあればリンク切れ扱い
-    2. 追加で Playwright(Chromium, headless) でページ表示
-       - body のテキストに GOFILE_NOT_FOUND_MARKERS のいずれかが入っていればリンク切れ
-    """
-
-    # ---- まずは普通の HTTP で軽くチェック ----
-    try:
-        resp = requests.get(url, headers=HEADERS, timeout=15)
-    except Exception as e:
-        print(f"[warn] gofile(requests) failed: {url} ({e})")
-        return False
-
-    if resp.status_code >= 400:
-        print(f"[info] gofile status {resp.status_code}: {url}")
-        return False
-
-    text_lower = resp.text.lower()
-    if any(m in text_lower for m in GOFILE_NOT_FOUND_MARKERS):
-        print(f"[info] gofile(not found markers in HTML via requests): {url}")
-        return False
-
-    # ---- Playwright で実際のレンダリング結果をチェック ----
-    try:
-        with sync_playwright() as p:
-            browser = p.chromium.launch(
-                headless=True,
-                args=["--no-sandbox"],
-            )
-            ctx = browser.new_context(
-                user_agent=HEADERS["User-Agent"],
-                locale="ja-JP",
-                viewport={"width": 1280, "height": 720},
-            )
-            page = ctx.new_page()
-            try:
-                page.goto(url, wait_until="domcontentloaded", timeout=20000)
-            except PlaywrightTimeoutError as e:
-                print(f"[warn] gofile(Playwright) timeout: {url} ({e})")
-                ctx.close()
-                browser.close()
-                return False
-            except Exception as e:
-                print(f"[warn] gofile(Playwright) goto failed: {url} ({e})")
-                ctx.close()
-                browser.close()
-                return False
-
-            # 少し待ってから body テキストを読む
-            page.wait_for_timeout(1500)
-            try:
-                body_text = page.text_content("body") or ""
-            except Exception:
-                body_text = page.content() or ""
-
-            body_lower = body_text.lower()
-            ctx.close()
-            browser.close()
-
-            if any(m in body_lower for m in GOFILE_NOT_FOUND_MARKERS):
-                print(f"[info] gofile(not found markers via Playwright): {url}")
-                return False
-
-    except Exception as e:
-        # Playwright 自体のエラー → 安全側（リンク切れ扱い）に倒す
-        print(f"[warn] gofile(Playwright outer) failed: {url} ({e})")
-        return False
-
-    # ここまで来たら「生きている」と判定
-    return True
 
 
 # =========================
@@ -215,19 +125,13 @@ def extract_links_from_html(html: str) -> Tuple[List[str], List[str]]:
 def _collect_orevideo_links(
     num_pages: int,
     deadline_ts: Optional[float],
-) -> Tuple[List[str], List[str], List[str]]:
+) -> Tuple[List[str], List[str]]:
     """
     orevideo のページを 1..num_pages まで巡回してリンクを集める。
-    戻り値: (twimg_all, gofile_early, gofile_late)
-      - gofile_early … page <= GOFILE_PRIORITY_MAX_PAGE の gofile
-      - gofile_late  … page >  GOFILE_PRIORITY_MAX_PAGE の gofile
-
-    ページ巡回は 1 → 2 → 3 → ... の順なので、
-    gofile_early の先頭ほど「より新しい」URLになる。
+    戻り値: (twimg_all, gofile_all)
     """
     twimg_all: List[str] = []
-    gofile_early: List[str] = []
-    gofile_late: List[str] = []
+    gofile_all: List[str] = []
 
     total_raw = 0
 
@@ -256,24 +160,56 @@ def _collect_orevideo_links(
         print(f"[info] orevideo list {url}: twimg={len(tw_list)}, gofile={len(gf_list)}")
 
         twimg_all.extend(tw_list)
+        gofile_all.extend(gf_list)
 
-        if p <= GOFILE_PRIORITY_MAX_PAGE:
-            gofile_early.extend(gf_list)
-        else:
-            gofile_late.extend(gf_list)
-
-        total_raw = len(twimg_all) + len(gofile_early) + len(gofile_late)
+        total_raw = len(twimg_all) + len(gofile_all)
         if total_raw >= RAW_LIMIT:
             print(f"[info] orevideo early stop at RAW_LIMIT={RAW_LIMIT}")
             break
 
         time.sleep(0.3)
 
-    return twimg_all, gofile_early, gofile_late
+    return twimg_all, gofile_all
 
 
 # =========================
-#   fetch_listing_pages（互換用／実際はあまり使わない）
+#   gofile 生存チェック（requests）
+# =========================
+
+def check_gofile_alive(url: str) -> bool | None:
+    """
+    gofile のURLが生きているかざっくり判定する。
+
+    戻り値:
+      True  = 生きてそう
+      False = 明らかに死んでいる（404/410/「This content does not exist」など）
+      None  = レート制限(429) or よく分からない失敗 → このURLは採用しないが、致命的エラー扱いもしない
+    """
+    try:
+        r = requests.get(url, headers=HEADERS, timeout=15)
+    except Exception as e:
+        print(f"[warn] gofile(requests) failed: {url} ({e})")
+        return None
+
+    if r.status_code == 429:
+        print(f"[info] gofile status 429: {url}")
+        return None
+
+    if r.status_code in (404, 410):
+        print(f"[info] gofile status {r.status_code}: {url}")
+        return False
+
+    # ページ本文に "This content does not exist" が含まれていれば死亡扱い
+    if "This content does not exist" in r.text:
+        print(f"[info] gofile(not found markers via requests): {url}")
+        return False
+
+    # 200 などでエラー文言も無ければ「生きてるっぽい」とする
+    return True
+
+
+# =========================
+#   fetch_listing_pages（bot.py 互換用）
 # =========================
 
 def fetch_listing_pages(
@@ -281,17 +217,17 @@ def fetch_listing_pages(
     deadline_ts: Optional[float] = None,
 ) -> List[str]:
     """
-    bot_orevideo 互換用のダミー実装。
+    bot.py 互換用のダミー実装。
     実際の URL 選別は collect_fresh_gofile_urls 側で行うため、
     ここでは twimg + gofile を全部まとめて返すだけ。
     """
-    tw, gf_early, gf_late = _collect_orevideo_links(num_pages=num_pages, deadline_ts=deadline_ts)
-    all_urls = tw + gf_early + gf_late
+    tw, gf = _collect_orevideo_links(num_pages=num_pages, deadline_ts=deadline_ts)
+    all_urls = tw + gf
     return all_urls[:RAW_LIMIT]
 
 
 # =========================
-#   collect_fresh_gofile_urls（bot_orevideo から呼ばれるメイン）
+#   collect_fresh_gofile_urls（bot.py から呼ばれるメイン）
 # =========================
 
 def collect_fresh_gofile_urls(
@@ -304,15 +240,11 @@ def collect_fresh_gofile_urls(
     orevideo 用の URL 選別ロジック。
 
     - orevideo から twimg / gofile を収集
-    - gofile は page=1 に近いものほど新しい前提で順に採用
-      （page <= GOFILE_PRIORITY_MAX_PAGE のものを優先）
-    - 1ツイートあたり:
-        gofile : 最大 GOFILE_TARGET 本（デフォルト 5）
-        twimg  : 残りを埋めて合計 want 本
-    - twimg / gofile ともに短縮せず、生URLのまま使う
-    - gofile は is_gofile_alive() でリンク切れチェック
-    - already_seen / このrun内の seen_now で重複を避ける
-    - MIN_POST 未満なら [] を返す（bot_orevideo 側でツイートしない）
+    - gofile は state.json 由来の already_seen で「生存確認前に」重複除外
+    - その gofile 候補のうち、最大 MAX_GOFILE_CHECKS_PER_RUN 本だけ生存確認
+      ・生きてる gofile が GOFILE_TARGET 本 集まったら即打ち切り
+    - 5本未満で終わったら、残りは twimg で埋めて合計 want 本にする
+    - twimg / gofile ともに生URLのまま返す（短縮しない）
     """
 
     # MIN_POST を環境変数から取得（パースできなければ 1）
@@ -333,80 +265,94 @@ def collect_fresh_gofile_urls(
     deadline_ts = (_now() + deadline_sec) if deadline_sec else None
 
     # orevideo から raw リンク収集
-    tw_all, gf_early, gf_late = _collect_orevideo_links(num_pages=num_pages, deadline_ts=deadline_ts)
+    tw_all_raw, gf_all_raw = _collect_orevideo_links(num_pages=num_pages, deadline_ts=deadline_ts)
 
-    # 目標本数
+    # =========================
+    #  1. gofile 候補: まず JSON 重複で絞る
+    # =========================
+
+    # すでに seen に入っているURLは「生存確認もしない」
+    normalized_already_seen = { _normalize_url(u) for u in already_seen }
+
+    candidate_gofile: List[str] = []
+    seen_raw_gf: Set[str] = set()
+
+    for url in gf_all_raw:
+        n = _normalize_url(url)
+        if not n:
+            continue
+        if n in seen_raw_gf:
+            continue
+        if n in normalized_already_seen:
+            # すでに state.json で使った or 最近使ったもの → スキップ
+            continue
+        seen_raw_gf.add(n)
+        candidate_gofile.append(url)
+
+    # =========================
+    #  2. gofile の生存確認（最大 N本まで）
+    # =========================
+
     go_target = min(GOFILE_TARGET, want)
-
-    results: List[str] = []
     selected_gofile: List[str] = []
     selected_twimg: List[str] = []
-    seen_now: Set[str] = set()
+    seen_now: Set[str] = set()  # この run 内で新たに採用したURL
 
-    def pick_gofile(raw_url: str) -> Optional[str]:
-        if not raw_url:
-            return None
+    gofile_checks = 0
+
+    for raw_url in candidate_gofile:
+        if len(selected_gofile) >= go_target:
+            # 目標本数に到達したら即終了
+            break
+        if gofile_checks >= MAX_GOFILE_CHECKS_PER_RUN:
+            # 429 を避けるため、生存確認回数に上限
+            print(f"[info] reached MAX_GOFILE_CHECKS_PER_RUN={MAX_GOFILE_CHECKS_PER_RUN}; stop gofile checks.")
+            break
+        if _deadline_passed(deadline_ts):
+            print("[info] deadline reached during gofile checks; stop.")
+            break
+
         raw_norm = _normalize_url(raw_url)
+        if raw_norm in seen_now or raw_norm in normalized_already_seen:
+            continue
 
-        # すでに使った / 過去に投稿した URL はスキップ
-        if raw_norm in seen_now or raw_norm in already_seen:
-            return None
+        gofile_checks += 1
+        alive = check_gofile_alive(raw_url)
 
-        # リンク切れチェック（requests + Playwright）
-        if not is_gofile_alive(raw_url):
-            return None
+        if alive is False:
+            # 死亡確定 → 採用せず次へ
+            continue
+        if alive is None:
+            # 429 やその他の怪しいエラー → このURLはスキップ
+            continue
 
+        # alive True → 採用
         seen_now.add(raw_norm)
-        return raw_url
+        selected_gofile.append(raw_url)
 
-    def pick_twimg(raw_url: str) -> Optional[str]:
-        if not raw_url:
-            return None
-        raw_norm = _normalize_url(raw_url)
-
-        # すでに使った / 過去に投稿した URL はスキップ
-        if raw_norm in seen_now or raw_norm in already_seen:
-            return None
-
-        seen_now.add(raw_norm)
-        return raw_url
-
-    # 1) gofile (優先ページ 1〜GOFILE_PRIORITY_MAX_PAGE)
-    for url in gf_early:
         if len(selected_gofile) >= go_target:
             break
-        if _deadline_passed(deadline_ts):
-            print("[info] deadline reached during gofile-early selection; stop.")
-            break
-        pick = pick_gofile(url)
-        if pick:
-            selected_gofile.append(pick)
 
-    # 2) gofile (残りはそれ以降のページから、NUM_PAGES まで)
-    if len(selected_gofile) < go_target:
-        for url in gf_late:
-            if len(selected_gofile) >= go_target:
+    # =========================
+    #  3. twimg で残りを埋める
+    # =========================
+
+    remaining = max(0, want - len(selected_gofile))
+
+    if remaining > 0:
+        for raw_url in tw_all_raw:
+            if len(selected_twimg) >= remaining:
                 break
             if _deadline_passed(deadline_ts):
-                print("[info] deadline reached during gofile-late selection; stop.")
+                print("[info] deadline reached during twimg selection; stop.")
                 break
-            pick = pick_gofile(url)
-            if pick:
-                selected_gofile.append(pick)
 
-    current_go = len(selected_gofile)
-    remaining = max(0, want - current_go)
+            raw_norm = _normalize_url(raw_url)
+            if raw_norm in seen_now or raw_norm in normalized_already_seen:
+                continue
 
-    # 3) twimg （全ページから、残り本数だけ）
-    for url in tw_all:
-        if len(selected_twimg) >= remaining:
-            break
-        if _deadline_passed(deadline_ts):
-            print("[info] deadline reached during twimg selection; stop.")
-            break
-        pick = pick_twimg(url)
-        if pick:
-            selected_twimg.append(pick)
+            seen_now.add(raw_norm)
+            selected_twimg.append(raw_url)
 
     results = selected_gofile + selected_twimg
 
