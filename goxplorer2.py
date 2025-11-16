@@ -8,7 +8,7 @@
 # ・collect_fresh_gofile_urls() で
 #   - gofile 最大 3 本
 #   - 残り twimg で埋めて WANT_POST 本（デフォ5）
-# ・twimg だけ v.gd で短縮、gofile は生URLのまま
+# ・どちらも短縮せず、生URLのまま返す
 # ・state.json の posted_urls / recent_urls_24h を使って重複除外
 
 import os
@@ -64,31 +64,6 @@ def _normalize_url(u: str) -> str:
     u = u.strip()
     u = re.sub(r"^http://", "https://", u, flags=re.I)
     return u.rstrip("/")
-
-
-# =========================
-#   v.gd 短縮（twimg 用）
-# =========================
-
-def shorten_via_vgd(long_url: str) -> str:
-    """
-    v.gd の API で URL を短縮。
-    失敗したら元 URL をそのまま返す。
-    """
-    try:
-        r = requests.get(
-            "https://v.gd/create.php",
-            params={"format": "simple", "url": long_url},
-            headers=HEADERS,
-            timeout=10,
-        )
-        r.raise_for_status()
-        short = (r.text or "").strip()
-        if short.startswith("http"):
-            return short
-    except Exception as e:
-        print(f"[warn] v.gd shorten failed for {long_url}: {e}")
-    return long_url
 
 
 # =========================
@@ -210,7 +185,7 @@ def fetch_listing_pages(
 
 
 # =========================
-#   collect_fresh_gofile_urls（bot.py から呼ばれるメイン）
+#   collect_fresh_gofile_urls（bot_orevideo.py から呼ばれるメイン）
 # =========================
 
 def collect_fresh_gofile_urls(
@@ -227,9 +202,9 @@ def collect_fresh_gofile_urls(
     - 1ツイートあたり:
         gofile : 最大 GOFILE_TARGET 本
         twimg  : 残りを埋めて合計 want 本
-    - twimg だけ v.gd で短縮、gofile は生URLのまま
+    - 短縮は行わず、両方とも生URLを返す
     - already_seen / このrun内の seen_now で重複を避ける
-    - MIN_POST 未満なら [] を返す（bot.py 側でツイートしない）
+    - MIN_POST 未満なら [] を返す（bot 側でツイートしない）
     """
 
     # MIN_POST を環境変数から取得（パースできなければ 1）
@@ -265,28 +240,21 @@ def collect_fresh_gofile_urls(
     def pick_url(raw_url: str, kind: str) -> str | None:
         """
         kind = "gofile" or "twimg"
-        - gofile: 生URLをそのまま使う
-        - twimg:  v.gd で短縮した URL を使う
+        両方とも生URLをそのまま使う。
         """
         if not raw_url:
             return None
 
         raw_norm = _normalize_url(raw_url)
 
-        # gofile は state.json にも生URLで保存されるので、そのままチェック
-        # twimg は短縮後のURLで state.json に保存されるので、
-        #   - 生URLがたまたま入っているケースも考えて一応見る
+        # state.json / recent_urls_24h 側との重複チェック
         if raw_norm in already_seen:
             return None
 
-        if kind == "twimg":
-            final = shorten_via_vgd(raw_url)
-        else:
-            final = raw_url
-
+        final = raw_url
         final_norm = _normalize_url(final)
 
-        # この run 内の重複 + state.json の重複
+        # この run 内での重複 + state.json との重複
         if final_norm in seen_now or final_norm in already_seen:
             return None
 
