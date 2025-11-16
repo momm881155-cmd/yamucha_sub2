@@ -1,0 +1,101 @@
+name: Orevideo Community Poster
+
+on:
+  schedule:
+    # JST 10:00 / 17:00 / 20:00  → UTC 01:00 / 08:00 / 11:00
+    - cron: "0 1 * * *"
+    - cron: "0 8 * * *"
+    - cron: "0 11 * * *"
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+concurrency:
+  group: ${{ github.workflow }}-orevideo-comm-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    env:
+      BRANCH_NAME: ${{ github.ref_name }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Sync with remote
+        run: |
+          git fetch origin "${BRANCH_NAME}"
+          git pull --rebase origin "${BRANCH_NAME}" || true
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run bot (orevideo community)
+        id: orevideo_comm
+        timeout-minutes: 10
+        env:
+          # orevideo スクレイピング設定（既存と同じでOK）
+          SCRAPE_TIMEOUT_SEC: 240
+          RAW_LIMIT: 200
+          NUM_PAGES: 50
+
+          # X(Twitter)
+          X_API_KEY: ${{ secrets.X_API_KEY }}
+          X_API_SECRET: ${{ secrets.X_API_SECRET }}
+          X_ACCESS_TOKEN: ${{ secrets.X_ACCESS_TOKEN }}
+          X_ACCESS_TOKEN_SECRET: ${{ secrets.X_ACCESS_TOKEN_SECRET }}
+          X_SCREEN_NAME: ${{ vars.X_SCREEN_NAME }}
+
+          # コミュニティに投稿したい場合だけ設定（通常ツイートで良ければ空のまま）
+          COMMUNITY_ID: ${{ secrets.COMMUNITY_ID }}
+
+        run: |
+          set -e
+          python bot_orevideo_comm.py | tee bot_orevideo_comm.log
+          if grep -q "tweeted id=" bot_orevideo_comm.log; then
+            echo "posted=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "posted=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Commit state
+        if: always()
+        env:
+          BRANCH_NAME: ${{ github.ref_name }}
+        run: |
+          set -e
+          if [[ ! -f "state_orevideo_comm.json" ]]; then
+            echo "state_orevideo_comm.json not found; skip."; exit 0
+          fi
+          if git diff --quiet -- state_orevideo_comm.json; then
+            echo "state_orevideo_comm.json unchanged; skip commit."; exit 0
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          cp state_orevideo_comm.json /tmp/state_orevideo_comm.json.saved
+
+          git reset --hard
+          git clean -fdx
+          git fetch origin "${BRANCH_NAME}"
+          git checkout "${BRANCH_NAME}"
+          git pull --rebase origin "${BRANCH_NAME}" || true
+
+          cp /tmp/state_orevideo_comm.json.saved state_orevideo_comm.json
+          if git diff --quiet -- state_orevideo_comm.json; then
+            echo "state_orevideo_comm.json equal to remote; skip commit."; exit 0
+          fi
+
+          git add state_orevideo_comm.json
+          git commit -m "chore: update orevideo community state $(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+          git push origin "${BRANCH_NAME}"
