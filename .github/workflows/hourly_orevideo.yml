@@ -52,6 +52,10 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
+      - name: Install Playwright browsers (Chromium)
+        run: |
+          python -m playwright install --with-deps chromium
+
       - name: Run bot (orevideo)
         id: orevideo
         timeout-minutes: 10
@@ -61,6 +65,10 @@ jobs:
           RAW_LIMIT: 200               # 最大で 200 URL まで候補
           FILTER_LIMIT: 80             # この中からフィルタ
           NUM_PAGES: 50                # ?page=1..50 を巡回
+
+          # gofile 選び方（必要なら変えてOK）
+          GOFILE_TARGET: 5             # 1ツイート内で狙う gofile 本数
+          GOFILE_PRIORITY_MAX_PAGE: 10 # page1〜10 を「新しい順」として優先
 
           # 投稿件数
           WANT_POST: 5                 # 1runでツイートしたい件数
