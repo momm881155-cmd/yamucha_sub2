@@ -1,9 +1,13 @@
 # goxplorer2.py — orevideo 専用スクレイパ
 #
-# ・https://orevideo.pythonanywhere.com/?sort=newest&page=N から
+# ・twimg:
+#     https://orevideo.pythonanywhere.com/?page=1&sort=popular からも取得（人気順）
+#     ＋ https://orevideo.pythonanywhere.com/?sort=newest&page=N からも取得（新着）
 #   - https://video.twimg.com/...mp4?tag=xx  （twimg 生URL）
+# ・gofile:
+#   - https://orevideo.pythonanywhere.com/?sort=newest&page=N からのみ取得
 #   - https://gofile.io/d/XXXXXX             （gofile 生URL）
-#   を収集
+#
 # ・gofile はページ 1〜GOFILE_PRIORITY_MAX_PAGE(デフォルト10) を優先
 # ・collect_fresh_gofile_urls() で:
 #   - gofile 最大 GOFILE_TARGET 本（デフォルト3本）
@@ -119,10 +123,11 @@ def _collect_orevideo_links(
     deadline_ts: Optional[float],
 ) -> Tuple[List[str], List[str], List[str]]:
     """
-    orevideo のページを 1..num_pages まで巡回してリンクを集める。
+    orevideo のページを巡回してリンクを集める。
     戻り値: (twimg_all, gofile_early, gofile_late)
-      - gofile_early … page <= GOFILE_PRIORITY_MAX_PAGE の gofile（優先）
-      - gofile_late  … page >  GOFILE_PRIORITY_MAX_PAGE の gofile（予備）
+      - twimg_all     … popular(1ページ目) + newest(1..num_pages)
+      - gofile_early  … newest のうち page <= GOFILE_PRIORITY_MAX_PAGE の gofile（優先）
+      - gofile_late   … newest のうち page >  GOFILE_PRIORITY_MAX_PAGE の gofile（予備）
     """
     twimg_all: List[str] = []
     gofile_early: List[str] = []
@@ -130,6 +135,21 @@ def _collect_orevideo_links(
 
     total_raw = 0
 
+    # 0) twimg 用: popular 1ページ目からも twimg を拾う（gofile は捨てる）
+    try:
+        pop_url = f"{BASE_ORIGIN}/?page=1&sort=popular"
+        resp = requests.get(pop_url, headers=HEADERS, timeout=20)
+        if resp.status_code == 200:
+            html = resp.text
+            tw_pop, gf_pop = extract_links_from_html(html)
+            print(f"[info] orevideo popular {pop_url}: twimg={len(tw_pop)}, gofile={len(gf_pop)}")
+            twimg_all.extend(tw_pop)  # popular 由来の twimg を先頭に足す
+        else:
+            print(f"[warn] orevideo status {resp.status_code} (popular): {pop_url}")
+    except Exception as e:
+        print(f"[warn] orevideo request failed (popular): {pop_url} ({e})")
+
+    # 1) 以降は従来どおり newest で 1..num_pages を巡回（gofile ロジックはそのまま）
     for p in range(1, num_pages + 1):
         if _deadline_passed(deadline_ts):
             print(f"[info] orevideo deadline at page={p}; stop.")
@@ -154,8 +174,10 @@ def _collect_orevideo_links(
         tw_list, gf_list = extract_links_from_html(html)
         print(f"[info] orevideo list {url}: twimg={len(tw_list)}, gofile={len(gf_list)}")
 
+        # twimg は newest 分も普通に足す
         twimg_all.extend(tw_list)
 
+        # gofile は従来どおり newest 側からのみ集計
         if p <= GOFILE_PRIORITY_MAX_PAGE:
             gofile_early.extend(gf_list)
         else:
@@ -245,6 +267,8 @@ def collect_fresh_gofile_urls(
     orevideo 用の URL 選別ロジック。
 
     - orevideo から twimg / gofile を収集
+      * twimg は popular(1ページ目) + newest(1..num_pages)
+      * gofile は newest(1..num_pages) からのみ
     - gofile はページ 1〜GOFILE_PRIORITY_MAX_PAGE のものを優先
     - 1ツイートあたり:
         gofile : 最大 GOFILE_TARGET 本（デフォルト 3）
