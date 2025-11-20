@@ -9,27 +9,18 @@
 #   - https://gofile.io/d/XXXXXX             （gofile 生URL）
 #
 # ・優先順位:
-#   1. Googleスプレッドシート(B列)の gofile URL（※B列を「下から上」に読む。下ほど新しい）
+#   1. Googleスプレッドシート(B列)の gofile URL
+#        - B列を「下から上」に読む（下の行ほど新しい）
+#        - D/E 列の内容は「フィルタには使うが、死活チェックはしない」
+#        - いまは「リンク切れチェックは一切しない」
 #   2. orevideo の gofile（ページ 1〜GOFILE_PRIORITY_MAX_PAGE を優先）
 #   3. twimg で残りを埋める
 #
-# ・gofile は必ず「生存確認」してから採用
-#   - HTTP ステータス
-#   - HTML 本文 / JSロード後の HTML に
-#       "This content does not exist",
-#       "The content you are looking for could not be found",
-#       "No items to display",
-#       "This content is password protected",
-#       "has been automatically removed",
-#       "has been deleted by the owner"
-#     などが出ていないか
+# ・gofile 生存確認:
+#   - シート側: いまはチェックなし（そのまま採用）
+#   - orevideo 側: HTTP + JS で従来どおりチェック
+#
 # ・state.json（already_seen）＋このrun内で重複除外
-# ・スプシー:
-#   - B列: gofile URL（http でも可）
-#   - D列: リンク切れなら「リンク切れ」 ※Bと同じ行
-#   - E列: ツイート成功したら「post成功」 ※Bと同じ行
-#   - D/E に何か書いてある行は再チェックしない
-#   - 同じ URL が複数行にあっても、「一番下の行」から優先して使う
 
 import os
 import re
@@ -38,10 +29,8 @@ import json
 from typing import List, Set, Optional, Tuple
 
 import requests
-
 import gspread
 from google.oauth2.service_account import Credentials
-
 from playwright.sync_api import sync_playwright
 
 # =========================
@@ -62,17 +51,20 @@ HEADERS = {
     "Connection": "keep-alive",
 }
 
-RAW_LIMIT    = int(os.getenv("RAW_LIMIT", "200"))  # orevideo 用は 200 で十分
+RAW_LIMIT    = int(os.getenv("RAW_LIMIT", "200"))
 FILTER_LIMIT = int(os.getenv("FILTER_LIMIT", "80"))
 
 # gofile を何本狙うか（1ツイート内の最大 gofile 本数）
 GOFILE_TARGET = int(os.getenv("GOFILE_TARGET", "3"))
 
-# gofile を「優先」する最大ページ（ここでは 1〜10 ページ目を優先）
+# gofile を「優先」する最大ページ（1〜このページを優先）
 GOFILE_PRIORITY_MAX_PAGE = int(os.getenv("GOFILE_PRIORITY_MAX_PAGE", "10"))
 
-# 1run で「生存確認」を行う gofile の上限本数（orevideo 側用）
+# orevideo 側で gofile 生存確認を行う最大件数
 MAX_GOFILE_CHECK = int(os.getenv("MAX_GOFILE_CHECK", "15"))
+
+# スプシー側で B列から拾う最大件数（下から何行まで見るか）
+MAX_SHEET_ROWS_LOOKUP = int(os.getenv("MAX_SHEET_ROWS_LOOKUP", "50"))
 
 # twimg / gofile 抽出用
 TWIMG_RE  = re.compile(r"https?://video\.twimg\.com/[^\s\"']+?\.mp4\?tag=\d+", re.I)
@@ -81,17 +73,13 @@ GOFILE_RE = re.compile(r"https?://gofile\.io/d/[A-Za-z0-9]+", re.I)
 # =========================
 #   スプレッドシート設定
 # =========================
-# ※ ファイル名は gofile_links ですが、コードでは URL の ID を使います
-#   - GOOGLE_SHEETS_CREDENTIALS_JSON: サービスアカウント JSON の中身（Secrets）
-#   - GOOGLE_SHEETS_ID: スプレッドシート ID（URL中の /d/xxxx/ の xxxx 部分）（Vars or Secrets）
-#   - GOOGLE_SHEETS_NAME: シート名（タブ名）省略時は「シート1」
 
 SHEET_SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
 SHEET_CREDENTIALS_JSON_ENV = os.getenv("GOOGLE_SHEETS_CREDENTIALS_JSON")
 SPREADSHEET_ID = os.getenv("GOOGLE_SHEETS_ID")
 SHEET_NAME = os.getenv("GOOGLE_SHEETS_NAME", "シート1")
 
-# URL -> 行番号 の対応（同一 run 内で共有）
+# URL -> 行番号 の対応（将来的に E列「post成功」を付けるとき用）
 _SHEET_URL_ROW: dict[str, int] = {}
 
 
@@ -132,10 +120,9 @@ def _unique_preserve(seq: List[str]) -> List[str]:
 def _get_sheet() -> Optional[gspread.Worksheet]:
     """
     環境変数:
-      - GOOGLE_SHEETS_CREDENTIALS_JSON: サービスアカウント JSON の中身をそのまま文字列で
+      - GOOGLE_SHEETS_CREDENTIALS_JSON: サービスアカウント JSON の中身
       - GOOGLE_SHEETS_ID: スプレッドシート ID
       - GOOGLE_SHEETS_NAME: シート名（タブ名, デフォルト「シート1」）
-    どれかが無い場合は None を返して、既存ロジックだけで動くようにする。
     """
     if not (SHEET_CREDENTIALS_JSON_ENV and SPREADSHEET_ID):
         return None
@@ -151,26 +138,102 @@ def _get_sheet() -> Optional[gspread.Worksheet]:
         return None
 
 
-def _load_alive_urls_from_sheet(
+# =========================
+#   gofile 判定（orevideo用・厳しめ）
+# =========================
+
+NOT_FOUND_KEYWORDS = [
+    "This content does not exist",
+    "The content you are looking for could not be found",
+    "No items to display",
+    "This content is password protected",
+    "has been automatically removed",
+    "has been deleted by the owner",
+]
+
+
+def _is_gofile_alive(
+    url: str,
+    timeout: int = 15,
+    deadline_ts: Optional[float] = None,
+) -> bool:
+    """
+    orevideo 用の「厳しめ」判定。
+    gofile のページを直接 GET + JSロードして生存確認。
+    - 200 以外: NG
+    - HTML / JSロード後の HTML に NOT_FOUND_KEYWORDS が含まれていたら NG
+    - 締切(deadline_ts)を超えそうなら即 False
+    """
+    if _deadline_passed(deadline_ts):
+        print(f"[info] skip gofile check due to deadline: {url}")
+        return False
+
+    # まずは普通の HTTP GET
+    try:
+        r = requests.get(url, headers=HEADERS, timeout=timeout)
+    except Exception as e:
+        print(f"[warn] gofile(requests) failed: {url} ({e})")
+        return False
+
+    if r.status_code == 429:
+        print(f"[info] gofile status 429: {url}")
+        return False
+
+    if r.status_code != 200:
+        print(f"[info] gofile status {r.status_code}: {url}")
+        return False
+
+    text = (r.text or "")
+    for kw in NOT_FOUND_KEYWORDS:
+        if kw in text:
+            print(f"[info] gofile(not found text): {url}")
+            return False
+
+    if _deadline_passed(deadline_ts):
+        print(f"[info] skip gofile JS check due to deadline: {url}")
+        return False
+
+    # JS ロード後の HTML もチェック（短めの待ち時間）
+    try:
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=True, args=["--no-sandbox"])
+            page = browser.new_page()
+            page.goto(url, timeout=timeout * 1000, wait_until="networkidle")
+            page.wait_for_timeout(1200)  # 1.2秒だけ余分に待つ
+            html = page.content()
+            browser.close()
+        for kw in NOT_FOUND_KEYWORDS:
+            if kw in html:
+                print(f"[info] gofile(not found text via JS): {url}")
+                return False
+    except Exception as e:
+        # Playwright がコケても致命的にはしない
+        print(f"[warn] gofile(playwright) failed: {url} ({e})")
+
+    print(f"[info] gofile alive: {url}")
+    return True
+
+
+# =========================
+#   スプシーから URL を読む（チェックなし版）
+# =========================
+
+def _load_urls_from_sheet_no_check(
     already_seen: Set[str],
     seen_now: Set[str],
     max_needed: int,
     deadline_ts: Optional[float],
 ) -> List[str]:
     """
-    スプシー(B列)から gofile URL を読み取り、以下を行う:
+    スプシー(B列)から gofile URL を読み取り、以下だけ行う:
 
-      - B列を「下から上」に読む（下の行ほど新しいものとして優先）
-      - D列 or E列に何か書いてある行はスキップ
-      - B列が重複している場合は、下の行を優先して使い、
-        同じURLの上の行はスキップ
+      - B列を「下から上」に読む（下の行ほど新しい）
+      - D列 or E列に何か書いてある行はスキップ（手動管理や今までの結果を尊重）
+      - B列が重複している場合は、下の行を優先
       - state.json & この run 内の seen_now に含まれる URL はスキップ
-      - gofile 生存確認 (_is_gofile_alive) で NG の場合は、
-        同じ行の D列に「リンク切れ」
-      - 生存しているものだけを返す（最大 max_needed 本）
 
-    ※ シート側の gofile チェックは MAX_GOFILE_CHECK に含めない
-       （orevideo 側の gofile チェック制限とは分離）
+    ※ gofile の「リンク切れチェック」は一切しない。
+    ※ DEAD / post成功 の書き込みもいまはしない。
     """
     ws = _get_sheet()
     if ws is None:
@@ -180,8 +243,7 @@ def _load_alive_urls_from_sheet(
     local_seen_urls: Set[str] = set()
 
     try:
-        # B2:E の範囲をまとめて取得（2行目以降）
-        rows = ws.get("B2:E")
+        rows = ws.get("B2:E")  # B2〜E 末尾まで
     except Exception as e:
         print(f"[warn] failed to read sheet values: {e}")
         return []
@@ -189,7 +251,7 @@ def _load_alive_urls_from_sheet(
     global _SHEET_URL_ROW
     _SHEET_URL_ROW = {}
 
-    start_row = 2               # B2 が rows[0]
+    start_row = 2
     total = len(rows)
 
     # rows を「下から上」に読む
@@ -199,9 +261,12 @@ def _load_alive_urls_from_sheet(
         if _deadline_passed(deadline_ts):
             print("[info] deadline reached during sheet selection; stop.")
             break
+        if i >= MAX_SHEET_ROWS_LOOKUP:
+            print(f"[info] reached MAX_SHEET_ROWS_LOOKUP={MAX_SHEET_ROWS_LOOKUP}; stop sheet lookup.")
+            break
 
         orig_i = total - 1 - i
-        row_index = start_row + orig_i  # 実際のシートの行番号（例: 2,3,4,...）
+        row_index = start_row + orig_i  # 実際のシート行番号
 
         b = row[0].strip() if len(row) >= 1 and row[0] else ""
         d = row[2].strip() if len(row) >= 3 and row[2] else ""
@@ -216,42 +281,35 @@ def _load_alive_urls_from_sheet(
         if not GOFILE_RE.match(norm):
             continue
 
-        # URL -> 行番号の対応を記録（一番下の行を優先）
+        # URL -> 行番号（将来 E列更新したいとき用）
         if norm not in _SHEET_URL_ROW:
             _SHEET_URL_ROW[norm] = row_index
 
-        # D or E に何か書いてあれば「すでに処理済み」
+        # D or E に何か書いてあれば「すでに扱った or 手動管理中」とみなしてスキップ
         if d or e:
             continue
 
-        # 同じ URL がスプシー内で重複していたら 1つの行だけ使う
+        # シート内重複（同じURLが上にもある場合は、下の行を優先）
         if norm in local_seen_urls:
             continue
         local_seen_urls.add(norm)
 
-        # state.json & この run ですでに使った URL はスキップ
+        # state.json / run 内で既に使用済み
         if norm in already_seen or norm in seen_now:
             continue
 
-        # gofile 生存確認（シート側チェックは MAX_GOFILE_CHECK に含めない）
-        if _is_gofile_alive(norm):
-            seen_now.add(norm)
-            alive_urls.append(norm)
-        else:
-            # リンク切れなら「B列と同じ行」の D列に「リンク切れ」
-            try:
-                ws.update_acell(f"D{row_index}", "リンク切れ")
-            except Exception as e2:
-                print(f"[warn] failed to mark dead in sheet (row={row_index}): {e2}")
+        # 生存チェックはせず、そのまま採用
+        seen_now.add(norm)
+        alive_urls.append(norm)
 
-    print(f"[info] sheet selected: gofile={len(alive_urls)} (max_needed={max_needed})")
+    print(f"[info] sheet(no-check) selected: gofile={len(alive_urls)} (max_needed={max_needed})")
     return alive_urls
 
 
 def mark_sheet_posted(urls: List[str], label: str = "post成功") -> None:
     """
-    ツイートに成功した URL について、スプシーの
-      - 「B列と同じ行」の E列 に「post成功」を書き込む。
+    将来的に、ツイート成功時に E列へ「post成功」を入れたいとき用の関数。
+    いまは bot_orevideo.py から呼んでいないので実質未使用。
     """
     if not urls:
         return
@@ -318,7 +376,7 @@ def _collect_orevideo_links(
 
     total_raw = 0
 
-    # 0) twimg 用: popular 1ページ目からも twimg を拾う（gofile は捨てる）
+    # 0) popular 1ページ目
     try:
         pop_url = f"{BASE_ORIGIN}/?page=1&sort=popular"
         resp = requests.get(pop_url, headers=HEADERS, timeout=20)
@@ -326,13 +384,13 @@ def _collect_orevideo_links(
             html = resp.text
             tw_pop, gf_pop = extract_links_from_html(html)
             print(f"[info] orevideo popular {pop_url}: twimg={len(tw_pop)}, gofile={len(gf_pop)}")
-            twimg_all.extend(tw_pop)  # popular 由来の twimg を先頭に足す
+            twimg_all.extend(tw_pop)
         else:
             print(f"[warn] orevideo status {resp.status_code} (popular): {pop_url}")
     except Exception as e:
         print(f"[warn] orevideo request failed (popular): {pop_url} ({e})")
 
-    # 1) newest で 1..num_pages を巡回
+    # 1) newest 1..num_pages
     for p in range(1, num_pages + 1):
         if _deadline_passed(deadline_ts):
             print(f"[info] orevideo deadline at page={p}; stop.")
@@ -357,10 +415,8 @@ def _collect_orevideo_links(
         tw_list, gf_list = extract_links_from_html(html)
         print(f"[info] orevideo list {url}: twimg={len(tw_list)}, gofile={len(gf_list)}")
 
-        # twimg は newest 分も普通に足す
         twimg_all.extend(tw_list)
 
-        # gofile は newest 側からのみ集計
         if p <= GOFILE_PRIORITY_MAX_PAGE:
             gofile_early.extend(gf_list)
         else:
@@ -377,70 +433,7 @@ def _collect_orevideo_links(
 
 
 # =========================
-#   gofile 生存確認
-# =========================
-
-NOT_FOUND_KEYWORDS = [
-    "This content does not exist",
-    "The content you are looking for could not be found",
-    "No items to display",
-    "This content is password protected",
-    "has been automatically removed",
-    "has been deleted by the owner",
-]
-
-
-def _is_gofile_alive(url: str, timeout: int = 15) -> bool:
-    """
-    gofile のページを直接 GET して生存確認。
-    - 200 以外: 基本 NG
-    - HTML / JSロード後の HTML に NOT_FOUND_KEYWORDS が含まれていたら NG
-    """
-    # まずは普通の HTTP GET で判定
-    try:
-        r = requests.get(url, headers=HEADERS, timeout=timeout)
-    except Exception as e:
-        print(f"[warn] gofile(requests) failed: {url} ({e})")
-        return False
-
-    if r.status_code == 429:
-        print(f"[info] gofile status 429: {url}")
-        return False
-
-    if r.status_code != 200:
-        print(f"[info] gofile status {r.status_code}: {url}")
-        return False
-
-    text = (r.text or "")
-    for kw in NOT_FOUND_KEYWORDS:
-        if kw in text:
-            print(f"[info] gofile(not found text): {url}")
-            return False
-
-    # 念のため JS ロード後の HTML もチェック（Playwright 使用）
-    try:
-        with sync_playwright() as p:
-            browser = p.chromium.launch(headless=True, args=["--no-sandbox"])
-            page = browser.new_page()
-            page.goto(url, timeout=timeout * 1000, wait_until="networkidle")
-            page.wait_for_timeout(2000)
-            html = page.content()
-            browser.close()
-        for kw in NOT_FOUND_KEYWORDS:
-            if kw in html:
-                print(f"[info] gofile(not found text via JS): {url}")
-                return False
-    except Exception as e:
-        # Playwright がコケても致命的にはしない
-        print(f"[warn] gofile(playwright) failed: {url} ({e})")
-
-    # 特に問題なければ「生きている」と判断
-    print(f"[info] gofile alive: {url}")
-    return True
-
-
-# =========================
-#   fetch_listing_pages（互換用／実際はあまり使わない）
+#   fetch_listing_pages（互換用）
 # =========================
 
 def fetch_listing_pages(
@@ -471,16 +464,13 @@ def collect_fresh_gofile_urls(
     orevideo 用の URL 選別ロジック。
 
     優先順位:
-      1. スプシー(B列)の gofile URL（B列を下から順に見る）
-      2. orevideo の gofile（ページ 1〜GOFILE_PRIORITY_MAX_PAGE 優先）
+      1. スプシー(B列)の gofile URL（B列を下から順に見る / チェックなし）
+      2. orevideo の gofile（ページ 1〜GOFILE_PRIORITY_MAX_PAGE 優先・厳しめチェック）
       3. twimg で残りを埋める
 
     - gofile 合計本数は GOFILE_TARGET 本（ただし want まで）
-    - gofile は必ず _is_gofile_alive() で生存確認
-    - スプシー:
-        * B列: URL
-        * D列: 「リンク切れ」
-        * E列: 「post成功」
+    - orevideo の gofile は _is_gofile_alive() で生存確認
+    - シート側 gofile は現在「チェックなし」で採用（D/E列更新なし）
     - already_seen / このrun内の seen_now で重複を避ける
     - MIN_POST 未満なら [] を返す（bot_orevideo.py 側でツイートしない）
     """
@@ -505,7 +495,7 @@ def collect_fresh_gofile_urls(
     # orevideo から raw リンク収集
     tw_all_raw, gf_early_raw, gf_late_raw = _collect_orevideo_links(num_pages=num_pages, deadline_ts=deadline_ts)
 
-    # 重複削除（ページ全体として）
+    # 重複削除
     tw_all    = _unique_preserve(tw_all_raw)
     gf_early  = _unique_preserve(gf_early_raw)
     gf_late   = _unique_preserve(gf_late_raw)
@@ -529,15 +519,15 @@ def collect_fresh_gofile_urls(
             return None
         return norm
 
-    # ------- 0) スプシー(B列)の gofile を優先して拾う -------
+    # ------- 0) スプシー(B列)の gofile を「チェックなし」で優先して拾う -------
 
-    sheet_alive = _load_alive_urls_from_sheet(
+    sheet_urls = _load_urls_from_sheet_no_check(
         already_seen=already_seen,
         seen_now=seen_now,
         max_needed=go_target,
         deadline_ts=deadline_ts,
     )
-    selected_gofile.extend(sheet_alive)
+    selected_gofile.extend(sheet_urls)
 
     # ------- 1) orevideo の gofile: 優先ページ (1〜GOFILE_PRIORITY_MAX_PAGE) -------
 
@@ -557,11 +547,11 @@ def collect_fresh_gofile_urls(
             continue
 
         gofile_checks += 1
-        if _is_gofile_alive(norm):
+        if _is_gofile_alive(norm, timeout=10, deadline_ts=deadline_ts):
             seen_now.add(norm)
             selected_gofile.append(norm)
 
-    # ------- 2) orevideo の gofile: それ以降のページ（足りないときだけ） -------
+    # ------- 2) orevideo の gofile: それ以降のページ -------
 
     if len(selected_gofile) < go_target:
         for url in gf_late:
@@ -579,7 +569,7 @@ def collect_fresh_gofile_urls(
                 continue
 
             gofile_checks += 1
-            if _is_gofile_alive(norm):
+            if _is_gofile_alive(norm, timeout=10, deadline_ts=deadline_ts):
                 seen_now.add(norm)
                 selected_gofile.append(norm)
 
