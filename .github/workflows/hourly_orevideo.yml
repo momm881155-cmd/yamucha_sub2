@@ -83,6 +83,12 @@ jobs:
           X_ACCESS_TOKEN_SECRET: ${{ secrets.X_ACCESS_TOKEN_SECRET }}
           X_SCREEN_NAME: ${{ vars.X_SCREEN_NAME }}
 
+          # Google Sheets 連携（★追加）
+          GOOGLE_SHEETS_CREDENTIALS_JSON: ${{ secrets.GOOGLE_SHEETS_CREDENTIALS_JSON }}
+          GOOGLE_SHEETS_ID: ${{ vars.GOOGLE_SHEETS_ID }}
+          # シート名は「シート1」。Vars で上書きしたい場合だけセットすればOK
+          GOOGLE_SHEETS_NAME: ${{ vars.GOOGLE_SHEETS_NAME }}
+
         run: |
           set -e
           python bot_orevideo.py | tee bot_orevideo.log
