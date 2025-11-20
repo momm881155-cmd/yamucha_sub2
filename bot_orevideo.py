@@ -7,7 +7,7 @@ from typing import List
 import tweepy
 from playwright.sync_api import sync_playwright
 
-from goxplorer2 import collect_fresh_gofile_urls  # ← ここだけ違う
+from goxplorer2 import collect_fresh_gofile_urls, mark_sheet_posted  # ← ここだけ増やした
 
 # =========================
 #   Amazon アフィリエイトリンク
@@ -304,6 +304,8 @@ def main():
     tweet_id = resp.data.get("id") if resp and resp.data else None
     print(f"[info] tweeted id={tweet_id}")
 
+    # ---- ここから下は既存ロジックどおり ----
+
     for u in urls[:WANT_POST]:
         if u not in state["posted_urls"]:
             state["posted_urls"].append(u)
@@ -311,6 +313,14 @@ def main():
     state["posts_today"] = state.get("posts_today", 0) + 1
     state["line_seq"] = start_seq + min(WANT_POST, len(urls))
     save_state(state)
+
+    # ---- スプシー側の E列 に「post成功」を書き込む ----
+    # （sheet に存在しない URL は無視される）
+    try:
+        if tweet_id:
+            mark_sheet_posted(urls[:WANT_POST])
+    except Exception as e:
+        print(f"[warn] mark_sheet_posted failed: {e}")
 
     used_urls = min(WANT_POST, len(urls))
     used_aff  = max(0, used_urls - 1)
