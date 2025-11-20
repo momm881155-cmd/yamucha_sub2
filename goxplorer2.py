@@ -9,18 +9,21 @@
 #   - https://gofile.io/d/XXXXXX             （gofile 生URL）
 #
 # ・優先順位:
-#   1. Googleスプレッドシート(B列)の gofile URL
-#        - B列を「下から上」に読む（下の行ほど新しい）
-#        - D/E 列の内容は「フィルタには使うが、死活チェックはしない」
-#        - いまは「リンク切れチェックは一切しない」
+#   1. Googleスプレッドシート(B列)の gofile URL（B列を「下から上」に読む。下ほど新しい）
 #   2. orevideo の gofile（ページ 1〜GOFILE_PRIORITY_MAX_PAGE を優先）
 #   3. twimg で残りを埋める
 #
-# ・gofile 生存確認:
-#   - シート側: いまはチェックなし（そのまま採用）
-#   - orevideo 側: HTTP + JS で従来どおりチェック
+# ・gofile は必ず「生存確認」してから採用
+#   - シート側: HTTPだけの「ゆるめ判定」(JSなし) ＋ 最大 30 件までチェック
+#   - orevideo 側: HTTP + JS の「厳しめ判定」(MAX_GOFILE_CHECK 件まで)
 #
 # ・state.json（already_seen）＋このrun内で重複除外
+# ・スプシー:
+#   - B列: gofile URL（http でも可）
+#   - D列: リンク切れなら「リンク切れ」 ※Bと同じ行
+#   - E列: ツイート成功したら「post成功」 ※Bと同じ行（※呼び出しはまだしてない）
+#   - D/E に何か書いてある行は再チェックしない
+#   - 同じ URL が複数行にあっても、「一番下の行」から優先して使う
 
 import os
 import re
@@ -63,8 +66,8 @@ GOFILE_PRIORITY_MAX_PAGE = int(os.getenv("GOFILE_PRIORITY_MAX_PAGE", "10"))
 # orevideo 側で gofile 生存確認を行う最大件数
 MAX_GOFILE_CHECK = int(os.getenv("MAX_GOFILE_CHECK", "15"))
 
-# スプシー側で B列から拾う最大件数（下から何行まで見るか）
-MAX_SHEET_ROWS_LOOKUP = int(os.getenv("MAX_SHEET_ROWS_LOOKUP", "50"))
+# スプシー側で gofile 生存確認を行う最大件数（★ここを 30 件まで）
+MAX_SHEET_GOFILE_CHECK = int(os.getenv("MAX_SHEET_GOFILE_CHECK", "30"))
 
 # twimg / gofile 抽出用
 TWIMG_RE  = re.compile(r"https?://video\.twimg\.com/[^\s\"']+?\.mp4\?tag=\d+", re.I)
@@ -75,11 +78,14 @@ GOFILE_RE = re.compile(r"https?://gofile\.io/d/[A-Za-z0-9]+", re.I)
 # =========================
 
 SHEET_SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
+
+# ※ここは、yml で渡している環境変数名に合わせてください
+# 　今の説明ベースだと GOOGLE_SHEETS_CREDENTIALS_JSON を読む想定です。
 SHEET_CREDENTIALS_JSON_ENV = os.getenv("GOOGLE_SHEETS_CREDENTIALS_JSON")
 SPREADSHEET_ID = os.getenv("GOOGLE_SHEETS_ID")
 SHEET_NAME = os.getenv("GOOGLE_SHEETS_NAME", "シート1")
 
-# URL -> 行番号 の対応（将来的に E列「post成功」を付けるとき用）
+# URL -> 行番号 の対応（同一 run 内で共有）
 _SHEET_URL_ROW: dict[str, int] = {}
 
 
@@ -139,7 +145,7 @@ def _get_sheet() -> Optional[gspread.Worksheet]:
 
 
 # =========================
-#   gofile 判定（orevideo用・厳しめ）
+#   gofile 判定（共通）
 # =========================
 
 NOT_FOUND_KEYWORDS = [
@@ -150,6 +156,50 @@ NOT_FOUND_KEYWORDS = [
     "has been automatically removed",
     "has been deleted by the owner",
 ]
+
+
+def _check_gofile_status_basic(
+    url: str,
+    timeout: int = 10,
+    deadline_ts: Optional[float] = None,
+) -> Tuple[bool, bool]:
+    """
+    シート用の「ゆるめ」判定。
+    戻り値: (is_alive, definitely_dead)
+
+      - is_alive=True        → 生きていると判断
+      - definitely_dead=True → 明確に「コンテンツ無し」と判断できたときだけ True
+
+    ネットワークエラーや 429/500 系は:
+      → is_alive=False, definitely_dead=False
+      → シートには「リンク切れ」とは書かない（保留扱い）
+    """
+    if _deadline_passed(deadline_ts):
+        print(f"[info] skip basic gofile check due to deadline: {url}")
+        return False, False
+
+    try:
+        r = requests.get(url, headers=HEADERS, timeout=timeout)
+    except Exception as e:
+        print(f"[warn] gofile(requests basic) failed: {url} ({e})")
+        return False, False
+
+    if r.status_code == 429:
+        print(f"[info] gofile basic status 429: {url}")
+        return False, False
+
+    if r.status_code != 200:
+        print(f"[info] gofile basic status {r.status_code}: {url}")
+        return False, False
+
+    text = (r.text or "")
+    for kw in NOT_FOUND_KEYWORDS:
+        if kw in text:
+            print(f"[info] gofile basic(not found text): {url}")
+            return False, True  # 明確に死んでいる
+
+    # 特に問題なければ「生きている」
+    return True, False
 
 
 def _is_gofile_alive(
@@ -215,25 +265,28 @@ def _is_gofile_alive(
 
 
 # =========================
-#   スプシーから URL を読む（チェックなし版）
+#   スプシーから URL を読む（チェックあり）
 # =========================
 
-def _load_urls_from_sheet_no_check(
+def _load_alive_urls_from_sheet(
     already_seen: Set[str],
     seen_now: Set[str],
     max_needed: int,
     deadline_ts: Optional[float],
 ) -> List[str]:
     """
-    スプシー(B列)から gofile URL を読み取り、以下だけ行う:
+    スプシー(B列)から gofile URL を読み取り、以下を行う:
 
       - B列を「下から上」に読む（下の行ほど新しい）
-      - D列 or E列に何か書いてある行はスキップ（手動管理や今までの結果を尊重）
+      - D列 or E列に何か書いてある行はスキップ
       - B列が重複している場合は、下の行を優先
       - state.json & この run 内の seen_now に含まれる URL はスキップ
+      - gofile 生存確認 (_check_gofile_status_basic) で:
+          ・ alive=True           → 採用
+          ・ definitely_dead=True → D列に「リンク切れ」
+          ・ それ以外            → 何もしない（保留）
 
-    ※ gofile の「リンク切れチェック」は一切しない。
-    ※ DEAD / post成功 の書き込みもいまはしない。
+    ※ シート側の gofile チェック件数は MAX_SHEET_GOFILE_CHECK で制限（デフォ 30 件）
     """
     ws = _get_sheet()
     if ws is None:
@@ -243,7 +296,8 @@ def _load_urls_from_sheet_no_check(
     local_seen_urls: Set[str] = set()
 
     try:
-        rows = ws.get("B2:E")  # B2〜E 末尾まで
+        # B2:E の範囲をまとめて取得（2行目以降）
+        rows = ws.get("B2:E")
     except Exception as e:
         print(f"[warn] failed to read sheet values: {e}")
         return []
@@ -253,6 +307,7 @@ def _load_urls_from_sheet_no_check(
 
     start_row = 2
     total = len(rows)
+    sheet_checks = 0
 
     # rows を「下から上」に読む
     for i, row in enumerate(reversed(rows)):
@@ -261,8 +316,8 @@ def _load_urls_from_sheet_no_check(
         if _deadline_passed(deadline_ts):
             print("[info] deadline reached during sheet selection; stop.")
             break
-        if i >= MAX_SHEET_ROWS_LOOKUP:
-            print(f"[info] reached MAX_SHEET_ROWS_LOOKUP={MAX_SHEET_ROWS_LOOKUP}; stop sheet lookup.")
+        if sheet_checks >= MAX_SHEET_GOFILE_CHECK:
+            print(f"[info] reached MAX_SHEET_GOFILE_CHECK={MAX_SHEET_GOFILE_CHECK}; stop in sheet.")
             break
 
         orig_i = total - 1 - i
@@ -281,15 +336,15 @@ def _load_urls_from_sheet_no_check(
         if not GOFILE_RE.match(norm):
             continue
 
-        # URL -> 行番号（将来 E列更新したいとき用）
+        # URL -> 行番号の対応（下の行を優先）
         if norm not in _SHEET_URL_ROW:
             _SHEET_URL_ROW[norm] = row_index
 
-        # D or E に何か書いてあれば「すでに扱った or 手動管理中」とみなしてスキップ
+        # D or E に何か書いてあれば「処理済み」
         if d or e:
             continue
 
-        # シート内重複（同じURLが上にもある場合は、下の行を優先）
+        # シート内重複
         if norm in local_seen_urls:
             continue
         local_seen_urls.add(norm)
@@ -298,18 +353,34 @@ def _load_urls_from_sheet_no_check(
         if norm in already_seen or norm in seen_now:
             continue
 
-        # 生存チェックはせず、そのまま採用
-        seen_now.add(norm)
-        alive_urls.append(norm)
+        sheet_checks += 1
+        alive, definitely_dead = _check_gofile_status_basic(
+            norm,
+            timeout=10,
+            deadline_ts=deadline_ts,
+        )
+        if alive:
+            seen_now.add(norm)
+            alive_urls.append(norm)
+        elif definitely_dead:
+            # 明確に "This content does not exist" などが出ているときだけ D列にマーク
+            try:
+                ws.update_acell(f"D{row_index}", "リンク切れ")
+            except Exception as e2:
+                print(f"[warn] failed to mark dead in sheet (row={row_index}): {e2}")
+        else:
+            # ネットワークエラー / 一時的なエラーなどはシートには何も書かない
+            pass
 
-    print(f"[info] sheet(no-check) selected: gofile={len(alive_urls)} (max_needed={max_needed})")
+    print(f"[info] sheet selected: gofile={len(alive_urls)} (max_needed={max_needed})")
     return alive_urls
 
 
 def mark_sheet_posted(urls: List[str], label: str = "post成功") -> None:
     """
-    将来的に、ツイート成功時に E列へ「post成功」を入れたいとき用の関数。
-    いまは bot_orevideo.py から呼んでいないので実質未使用。
+    ツイートに成功した URL について、スプシーの
+      - 「B列と同じ行」の E列 に「post成功」を書き込む。
+    （※ bot_orevideo.py 側から必要なら呼ぶ想定）
     """
     if not urls:
         return
@@ -464,13 +535,13 @@ def collect_fresh_gofile_urls(
     orevideo 用の URL 選別ロジック。
 
     優先順位:
-      1. スプシー(B列)の gofile URL（B列を下から順に見る / チェックなし）
-      2. orevideo の gofile（ページ 1〜GOFILE_PRIORITY_MAX_PAGE 優先・厳しめチェック）
+      1. スプシー(B列)の gofile URL（B列を下から順に見る）
+      2. orevideo の gofile（ページ 1〜GOFILE_PRIORITY_MAX_PAGE 優先）
       3. twimg で残りを埋める
 
     - gofile 合計本数は GOFILE_TARGET 本（ただし want まで）
-    - orevideo の gofile は _is_gofile_alive() で生存確認
-    - シート側 gofile は現在「チェックなし」で採用（D/E列更新なし）
+    - スプシー側 gofile は _check_gofile_status_basic でゆるめチェック（最大30件）
+    - orevideo の gofile は _is_gofile_alive() で厳しめチェック
     - already_seen / このrun内の seen_now で重複を避ける
     - MIN_POST 未満なら [] を返す（bot_orevideo.py 側でツイートしない）
     """
@@ -519,15 +590,15 @@ def collect_fresh_gofile_urls(
             return None
         return norm
 
-    # ------- 0) スプシー(B列)の gofile を「チェックなし」で優先して拾う -------
+    # ------- 0) スプシー(B列)の gofile を優先して拾う（チェックあり） -------
 
-    sheet_urls = _load_urls_from_sheet_no_check(
+    sheet_alive = _load_alive_urls_from_sheet(
         already_seen=already_seen,
         seen_now=seen_now,
         max_needed=go_target,
         deadline_ts=deadline_ts,
     )
-    selected_gofile.extend(sheet_urls)
+    selected_gofile.extend(sheet_alive)
 
     # ------- 1) orevideo の gofile: 優先ページ (1〜GOFILE_PRIORITY_MAX_PAGE) -------
 
