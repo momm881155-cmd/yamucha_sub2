@@ -71,7 +71,7 @@ GOFILE_TARGET = int(os.getenv("GOFILE_TARGET", "3"))
 # gofile を「優先」する最大ページ（ここでは 1〜10 ページ目を優先）
 GOFILE_PRIORITY_MAX_PAGE = int(os.getenv("GOFILE_PRIORITY_MAX_PAGE", "10"))
 
-# 1run で「生存確認」を行う gofile の上限本数
+# 1run で「生存確認」を行う gofile の上限本数（orevideo 側用）
 MAX_GOFILE_CHECK = int(os.getenv("MAX_GOFILE_CHECK", "15"))
 
 # twimg / gofile 抽出用
@@ -155,7 +155,6 @@ def _load_alive_urls_from_sheet(
     already_seen: Set[str],
     seen_now: Set[str],
     max_needed: int,
-    gofile_checks_ref: list[int],
     deadline_ts: Optional[float],
 ) -> List[str]:
     """
@@ -170,7 +169,8 @@ def _load_alive_urls_from_sheet(
         同じ行の D列に「リンク切れ」
       - 生存しているものだけを返す（最大 max_needed 本）
 
-    gofile_checks_ref[0] に、チェック回数を足し込む。
+    ※ シート側の gofile チェックは MAX_GOFILE_CHECK に含めない
+       （orevideo 側の gofile チェック制限とは分離）
     """
     ws = _get_sheet()
     if ws is None:
@@ -192,18 +192,12 @@ def _load_alive_urls_from_sheet(
     start_row = 2               # B2 が rows[0]
     total = len(rows)
 
-    # ★ ここがポイント： rows を「下から上」に読む
-    #   i: 0..total-1 （reversed順のインデックス）
-    #   元のインデックス orig_i = total-1 - i
-    #   行番号 row_index = start_row + orig_i
+    # rows を「下から上」に読む
     for i, row in enumerate(reversed(rows)):
         if len(alive_urls) >= max_needed:
             break
         if _deadline_passed(deadline_ts):
             print("[info] deadline reached during sheet selection; stop.")
-            break
-        if gofile_checks_ref[0] >= MAX_GOFILE_CHECK:
-            print(f"[info] reached MAX_GOFILE_CHECK={MAX_GOFILE_CHECK} in sheet; stop.")
             break
 
         orig_i = total - 1 - i
@@ -218,16 +212,15 @@ def _load_alive_urls_from_sheet(
 
         norm = _normalize_url(b)
 
-        # gofile 以外は無視（念のため）
+        # gofile 以外は無視
         if not GOFILE_RE.match(norm):
             continue
 
-        # URL -> 行番号の対応を記録
-        # （一番最初に見つかった＝一番下の行を優先）
+        # URL -> 行番号の対応を記録（一番下の行を優先）
         if norm not in _SHEET_URL_ROW:
             _SHEET_URL_ROW[norm] = row_index
 
-        # D or E に何か書いてあれば「すでに処理済み」とみなしてスキップ
+        # D or E に何か書いてあれば「すでに処理済み」
         if d or e:
             continue
 
@@ -240,14 +233,14 @@ def _load_alive_urls_from_sheet(
         if norm in already_seen or norm in seen_now:
             continue
 
-        gofile_checks_ref[0] += 1
+        # gofile 生存確認（シート側チェックは MAX_GOFILE_CHECK に含めない）
         if _is_gofile_alive(norm):
             seen_now.add(norm)
             alive_urls.append(norm)
         else:
             # リンク切れなら「B列と同じ行」の D列に「リンク切れ」
             try:
-                ws.update(f"D{row_index}", "リンク切れ")
+                ws.update_acell(f"D{row_index}", "リンク切れ")
             except Exception as e2:
                 print(f"[warn] failed to mark dead in sheet (row={row_index}): {e2}")
 
@@ -274,7 +267,7 @@ def mark_sheet_posted(urls: List[str], label: str = "post成功") -> None:
         if not row:
             continue
         try:
-            ws.update(f"E{row}", label)
+            ws.update_acell(f"E{row}", label)
         except Exception as e:
             print(f"[warn] failed to mark post成功 in sheet (row={row}): {e}")
 
@@ -339,7 +332,7 @@ def _collect_orevideo_links(
     except Exception as e:
         print(f"[warn] orevideo request failed (popular): {pop_url} ({e})")
 
-    # 1) 以降は従来どおり newest で 1..num_pages を巡回（gofile ロジックはそのまま）
+    # 1) newest で 1..num_pages を巡回
     for p in range(1, num_pages + 1):
         if _deadline_passed(deadline_ts):
             print(f"[info] orevideo deadline at page={p}; stop.")
@@ -367,7 +360,7 @@ def _collect_orevideo_links(
         # twimg は newest 分も普通に足す
         twimg_all.extend(tw_list)
 
-        # gofile は従来どおり newest 側からのみ集計
+        # gofile は newest 側からのみ集計
         if p <= GOFILE_PRIORITY_MAX_PAGE:
             gofile_early.extend(gf_list)
         else:
@@ -509,7 +502,7 @@ def collect_fresh_gofile_urls(
 
     deadline_ts = (_now() + deadline_sec) if deadline_sec else None
 
-    # orevideo から raw リンク収集（従来どおり）
+    # orevideo から raw リンク収集
     tw_all_raw, gf_early_raw, gf_late_raw = _collect_orevideo_links(num_pages=num_pages, deadline_ts=deadline_ts)
 
     # 重複削除（ページ全体として）
@@ -538,19 +531,17 @@ def collect_fresh_gofile_urls(
 
     # ------- 0) スプシー(B列)の gofile を優先して拾う -------
 
-    gofile_checks_ref = [0]
     sheet_alive = _load_alive_urls_from_sheet(
         already_seen=already_seen,
         seen_now=seen_now,
         max_needed=go_target,
-        gofile_checks_ref=gofile_checks_ref,
         deadline_ts=deadline_ts,
     )
     selected_gofile.extend(sheet_alive)
-    gofile_checks = gofile_checks_ref[0]
 
-    # ------- 1) gofile: 優先ページ (1〜GOFILE_PRIORITY_MAX_PAGE) -------
+    # ------- 1) orevideo の gofile: 優先ページ (1〜GOFILE_PRIORITY_MAX_PAGE) -------
 
+    gofile_checks = 0
     for url in gf_early:
         if len(selected_gofile) >= go_target:
             break
@@ -570,7 +561,7 @@ def collect_fresh_gofile_urls(
             seen_now.add(norm)
             selected_gofile.append(norm)
 
-    # ------- 2) gofile: それ以降のページ（足りないときだけ） -------
+    # ------- 2) orevideo の gofile: それ以降のページ（足りないときだけ） -------
 
     if len(selected_gofile) < go_target:
         for url in gf_late:
