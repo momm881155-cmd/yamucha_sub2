@@ -9,7 +9,7 @@
 #   - https://gofile.io/d/XXXXXX             （gofile 生URL）
 #
 # ・優先順位:
-#   1. Googleスプレッドシート(B列)の gofile URL
+#   1. Googleスプレッドシート(B列)の gofile URL（※B列を「下から上」に読む。下ほど新しい）
 #   2. orevideo の gofile（ページ 1〜GOFILE_PRIORITY_MAX_PAGE を優先）
 #   3. twimg で残りを埋める
 #
@@ -26,10 +26,10 @@
 # ・state.json（already_seen）＋このrun内で重複除外
 # ・スプシー:
 #   - B列: gofile URL（http でも可）
-#   - D列: リンク切れなら「リンク切れ」
-#   - E列: ツイート成功したら「post成功」
+#   - D列: リンク切れなら「リンク切れ」 ※Bと同じ行
+#   - E列: ツイート成功したら「post成功」 ※Bと同じ行
 #   - D/E に何か書いてある行は再チェックしない
-#   - 同じ URL が複数行にあっても、1つ目だけ使う
+#   - 同じ URL が複数行にあっても、「一番下の行」から優先して使う
 
 import os
 import re
@@ -83,7 +83,7 @@ GOFILE_RE = re.compile(r"https?://gofile\.io/d/[A-Za-z0-9]+", re.I)
 # =========================
 # ※ ファイル名は gofile_links ですが、コードでは URL の ID を使います
 #   - GOOGLE_SHEETS_CREDENTIALS_JSON: サービスアカウント JSON の中身（Secrets）
-#   - GOOGLE_SHEETS_ID: スプレッドシート ID（URL中の /d/xxxx/ の xxxx 部分）（Vars）
+#   - GOOGLE_SHEETS_ID: スプレッドシート ID（URL中の /d/xxxx/ の xxxx 部分）（Vars or Secrets）
 #   - GOOGLE_SHEETS_NAME: シート名（タブ名）省略時は「シート1」
 
 SHEET_SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
@@ -160,11 +160,16 @@ def _load_alive_urls_from_sheet(
 ) -> List[str]:
     """
     スプシー(B列)から gofile URL を読み取り、以下を行う:
+
+      - B列を「下から上」に読む（下の行ほど新しいものとして優先）
       - D列 or E列に何か書いてある行はスキップ
-      - B列が重複している場合は先に出てきた行だけ採用
+      - B列が重複している場合は、下の行を優先して使い、
+        同じURLの上の行はスキップ
       - state.json & この run 内の seen_now に含まれる URL はスキップ
-      - gofile 生存確認 (_is_gofile_alive) で NG の場合は D列に「リンク切れ」
+      - gofile 生存確認 (_is_gofile_alive) で NG の場合は、
+        同じ行の D列に「リンク切れ」
       - 生存しているものだけを返す（最大 max_needed 本）
+
     gofile_checks_ref[0] に、チェック回数を足し込む。
     """
     ws = _get_sheet()
@@ -184,7 +189,14 @@ def _load_alive_urls_from_sheet(
     global _SHEET_URL_ROW
     _SHEET_URL_ROW = {}
 
-    for idx, row in enumerate(rows, start=2):  # 行番号は 2 から
+    start_row = 2               # B2 が rows[0]
+    total = len(rows)
+
+    # ★ ここがポイント： rows を「下から上」に読む
+    #   i: 0..total-1 （reversed順のインデックス）
+    #   元のインデックス orig_i = total-1 - i
+    #   行番号 row_index = start_row + orig_i
+    for i, row in enumerate(reversed(rows)):
         if len(alive_urls) >= max_needed:
             break
         if _deadline_passed(deadline_ts):
@@ -193,6 +205,9 @@ def _load_alive_urls_from_sheet(
         if gofile_checks_ref[0] >= MAX_GOFILE_CHECK:
             print(f"[info] reached MAX_GOFILE_CHECK={MAX_GOFILE_CHECK} in sheet; stop.")
             break
+
+        orig_i = total - 1 - i
+        row_index = start_row + orig_i  # 実際のシートの行番号（例: 2,3,4,...）
 
         b = row[0].strip() if len(row) >= 1 and row[0] else ""
         d = row[2].strip() if len(row) >= 3 and row[2] else ""
@@ -207,15 +222,16 @@ def _load_alive_urls_from_sheet(
         if not GOFILE_RE.match(norm):
             continue
 
-        # 行番号キャッシュ（重複でも上書きしない）
+        # URL -> 行番号の対応を記録
+        # （一番最初に見つかった＝一番下の行を優先）
         if norm not in _SHEET_URL_ROW:
-            _SHEET_URL_ROW[norm] = idx
+            _SHEET_URL_ROW[norm] = row_index
 
         # D or E に何か書いてあれば「すでに処理済み」とみなしてスキップ
         if d or e:
             continue
 
-        # 同じ URL がスプシー内で重複していたら 1つ目だけ使う（local_seen_urls）
+        # 同じ URL がスプシー内で重複していたら 1つの行だけ使う
         if norm in local_seen_urls:
             continue
         local_seen_urls.add(norm)
@@ -229,11 +245,11 @@ def _load_alive_urls_from_sheet(
             seen_now.add(norm)
             alive_urls.append(norm)
         else:
-            # リンク切れなら D列に「リンク切れ」
+            # リンク切れなら「B列と同じ行」の D列に「リンク切れ」
             try:
-                ws.update(f"D{idx}", "リンク切れ")
+                ws.update(f"D{row_index}", "リンク切れ")
             except Exception as e2:
-                print(f"[warn] failed to mark dead in sheet (row={idx}): {e2}")
+                print(f"[warn] failed to mark dead in sheet (row={row_index}): {e2}")
 
     print(f"[info] sheet selected: gofile={len(alive_urls)} (max_needed={max_needed})")
     return alive_urls
@@ -241,8 +257,8 @@ def _load_alive_urls_from_sheet(
 
 def mark_sheet_posted(urls: List[str], label: str = "post成功") -> None:
     """
-    ツイートに成功した URL について、スプシーの E列に「post成功」を書き込む。
-    - その run で _load_alive_urls_from_sheet を通っていない URL は、行番号が分からないので無視。
+    ツイートに成功した URL について、スプシーの
+      - 「B列と同じ行」の E列 に「post成功」を書き込む。
     """
     if not urls:
         return
@@ -462,7 +478,7 @@ def collect_fresh_gofile_urls(
     orevideo 用の URL 選別ロジック。
 
     優先順位:
-      1. スプシー(B列)の gofile URL
+      1. スプシー(B列)の gofile URL（B列を下から順に見る）
       2. orevideo の gofile（ページ 1〜GOFILE_PRIORITY_MAX_PAGE 優先）
       3. twimg で残りを埋める
 
