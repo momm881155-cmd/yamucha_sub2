@@ -149,12 +149,20 @@ def compose_fixed5_text(
     ・URL 本数 = WANT_POST (最大)
     ・Amazon 本数 = URL本数 - 1
     ・セリフ & アフィリンクは毎回ランダム（ツイート内でアフィ被りなし）
+    ※番号は 1〜99 の範囲でループ（内部カウンタはそのまま）
     """
     urls = gofile_urls[:WANT_POST]
     if not urls:
         return "", 0
 
     invis = INVISIBLES[salt_idx % len(INVISIBLES)]
+
+    # 1〜99 に丸める関数
+    def wrap_seq(n: int) -> int:
+        n_int = int(n)
+        if n_int < 1:
+            n_int = 1
+        return ((n_int - 1) % 99) + 1
 
     # セリフ1つランダム
     serif = random.choice(SERIF_LIST) if SERIF_LIST else ""
@@ -171,13 +179,14 @@ def compose_fixed5_text(
     if serif:
         lines.append(serif)
 
-    seq = start_seq
+    raw_seq = start_seq  # 内部カウンタ（state.line_seq）はそのまま使う
     aff_idx = 0
 
     for i, u in enumerate(urls):
-        # 番号付き URL 行
-        lines.append(f"{seq}{invis}. {u}")
-        seq += 1
+        # 表示用番号は 1〜99 にラップ
+        disp_seq = wrap_seq(raw_seq)
+        lines.append(f"{disp_seq}{invis}. {u}")
+        raw_seq += 1
 
         # 次の URL との間に Amazon リンクを挟む
         if i < len(urls) - 1 and aff_idx < len(aff_list):
