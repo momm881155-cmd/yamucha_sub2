@@ -559,10 +559,14 @@
     "https://video.twimg.com/amplify_video/1991785008370253824/vid/avc1/720x494/1DQRZpILk8OrPPno.mp4?tag=14",
     "https://video.twimg.com/ext_tw_video/1883629908519489537/pu/vid/avc1/720x1280/ikYZcZPveUtXmZ-C.mp4?tag=12",
     "https://video.twimg.com/amplify_video/1971946915949412352/vid/avc1/856x480/7nBMPz_v-kuWhA2C.mp4?tag=14",
-    "https://video.twimg.com/amplify_video/1969431499033493504/vid/avc1/1280x720/Sx4p3pH4NsnhUAM_.mp4?tag=21"
+    "https://video.twimg.com/amplify_video/1969431499033493504/vid/avc1/1280x720/Sx4p3pH4NsnhUAM_.mp4?tag=21",
+    "https://video.twimg.com/amplify_video/1991459576525606912/vid/avc1/1280x720/7kjIdfXT3wd0I_Y_.mp4?tag=21",
+    "https://video.twimg.com/amplify_video/1988238444741681152/vid/avc1/1920x1080/y9xgYFIyfJE7PTkM.mp4?tag=21",
+    "https://video.twimg.com/amplify_video/1991545192076439553/vid/avc1/480x852/WIZRQE9_r5s87cnE.mp4?tag=14",
+    "https://video.twimg.com/amplify_video/1985815310042030080/vid/avc1/1000x1600/Yll27bvMDqBC2PVC.mp4?tag=21"
   ],
   "last_post_date": "2025-11-23",
-  "posts_today": 14,
+  "posts_today": 15,
   "recent_urls_24h": [
     {
       "url": "https://gofile.io/d/ZqQ46b",
@@ -763,7 +767,23 @@
     {
       "url": "https://video.twimg.com/amplify_video/1969431499033493504/vid/avc1/1280x720/Sx4p3pH4NsnhUAM_.mp4?tag=21",
       "ts": "2025-11-23T12:26:28.538245+00:00"
+    },
+    {
+      "url": "https://video.twimg.com/amplify_video/1991459576525606912/vid/avc1/1280x720/7kjIdfXT3wd0I_Y_.mp4?tag=21",
+      "ts": "2025-11-23T13:31:58.025502+00:00"
+    },
+    {
+      "url": "https://video.twimg.com/amplify_video/1988238444741681152/vid/avc1/1920x1080/y9xgYFIyfJE7PTkM.mp4?tag=21",
+      "ts": "2025-11-23T13:31:58.025502+00:00"
+    },
+    {
+      "url": "https://video.twimg.com/amplify_video/1991545192076439553/vid/avc1/480x852/WIZRQE9_r5s87cnE.mp4?tag=14",
+      "ts": "2025-11-23T13:31:58.025502+00:00"
+    },
+    {
+      "url": "https://video.twimg.com/amplify_video/1985815310042030080/vid/avc1/1000x1600/Yll27bvMDqBC2PVC.mp4?tag=21",
+      "ts": "2025-11-23T13:31:58.025502+00:00"
     }
   ],
-  "line_seq": 561
+  "line_seq": 565
 }
