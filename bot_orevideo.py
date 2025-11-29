@@ -9,6 +9,12 @@ from playwright.sync_api import sync_playwright
 
 from goxplorer2 import collect_fresh_gofile_urls, mark_sheet_posted  # ← ここだけ増やした
 
+import requests
+try:
+    from requests_oauthlib import OAuth1
+except ImportError:
+    OAuth1 = None
+
 # =========================
 #   Amazon アフィリエイトリンク
 # =========================
@@ -240,8 +246,36 @@ def fetch_recent_urls_via_web(username: str, scrolls: int = 1, wait_ms: int = 80
         seen.add(normalize_url(m))
     return seen
 
-def post_to_x_v2(client, text: str):
+def post_to_x_v2(client, text: str, quote_tweet_id: str | None = None):
+    if quote_tweet_id:
+        return client.create_tweet(text=text, quote_tweet_id=quote_tweet_id)
     return client.create_tweet(text=text)
+
+def _oauth1_session():
+    if OAuth1 is None:
+        raise RuntimeError("requests-oauthlib が必要です。requirements.txt に 'requests-oauthlib==1.3.1' を追加してください。")
+    return OAuth1(
+        os.environ["X_API_KEY"],
+        os.environ["X_API_SECRET"],
+        os.environ["X_ACCESS_TOKEN"],
+        os.environ["X_ACCESS_TOKEN_SECRET"],
+        signature_type='auth_header'
+    )
+
+def post_to_community_via_undocumented_api(status_text: str, community_id: str):
+    # 旧Twitterエンドポイント。環境によっては https://api.x.com/2/tweets でも可
+    url = "https://api.twitter.com/2/tweets"
+    payload = {"text": status_text, "community_id": str(community_id)}
+    sess = _oauth1_session()
+    headers = {"Content-Type": "application/json"}
+    r = requests.post(url, headers=headers, data=json.dumps(payload), auth=sess, timeout=30)
+    try:
+        body = r.json()
+    except Exception:
+        body = r.text
+    if not r.ok:
+        raise RuntimeError(f"community post failed {r.status_code}: {body}")
+    return body
 
 def main():
     start_ts = time.monotonic()
@@ -260,8 +294,8 @@ def main():
 
     if USE_API_TIMELINE:
         try:
-            client = get_client()
-            me = client.get_me(user_auth=True)
+            client_tmp = get_client()
+            me = client_tmp.get_me(user_auth=True)
             user = me.data if me and me.data else None
             username = getattr(user, "username", None)
         except Exception:
@@ -308,10 +342,29 @@ def main():
     while estimate_tweet_len_tco(status_text) > TWEET_LIMIT:
         status_text = status_text.rstrip(ZWSP + ZWNJ)
 
+    community_id = os.getenv("X_COMMUNITY_ID", "").strip()
     client = get_client()
-    resp = post_to_x_v2(client, status_text)
-    tweet_id = resp.data.get("id") if resp and resp.data else None
-    print(f"[info] tweeted id={tweet_id}")
+
+    if community_id:
+        # 1) コミュニティに投稿
+        resp_comm = post_to_community_via_undocumented_api(status_text, community_id)
+        comm_id = resp_comm.get("data", {}).get("id") if isinstance(resp_comm, dict) else None
+        print(f"[info] community posted id={comm_id}")
+
+        # 2) 自分のTLにも引用ポスト（IDが取れなかったら通常ポスト）
+        if comm_id:
+            resp = post_to_x_v2(client, status_text, quote_tweet_id=comm_id)
+            tweet_id = resp.data.get("id") if resp and resp.data else None
+            print(f"[info] tweeted id={tweet_id} (quote community)")
+        else:
+            resp = post_to_x_v2(client, status_text)
+            tweet_id = resp.data.get("id") if resp and resp.data else None
+            print(f"[info] tweeted id={tweet_id} (fallback normal)")
+    else:
+        # 通常ポストのみ
+        resp = post_to_x_v2(client, status_text)
+        tweet_id = resp.data.get("id") if resp and resp.data else None
+        print(f"[info] tweeted id={tweet_id}")
 
     # ---- ここから下は既存ロジックどおり ----
 
