@@ -959,10 +959,15 @@
     "https://gofile.io/d/NqiTY8",
     "https://gofile.io/d/4ow3CS",
     "https://gofile.io/d/wUmaCM",
-    "https://gofile.io/d/vn373q"
+    "https://gofile.io/d/vn373q",
+    "https://gofile.io/d/VDg0Gd",
+    "https://gofile.io/d/bDKpfa",
+    "https://gofile.io/d/XZAnhp",
+    "https://gofile.io/d/BqyoBr",
+    "https://gofile.io/d/4DGP9C"
   ],
   "last_post_date": "2025-11-30",
-  "posts_today": 2,
+  "posts_today": 3,
   "recent_urls_24h": [
     {
       "url": "https://gofile.io/d/JrP8W8",
@@ -1003,7 +1008,27 @@
     {
       "url": "https://gofile.io/d/vn373q",
       "ts": "2025-11-30T11:34:09.688525+00:00"
+    },
+    {
+      "url": "https://gofile.io/d/VDg0Gd",
+      "ts": "2025-11-30T12:28:19.285806+00:00"
+    },
+    {
+      "url": "https://gofile.io/d/bDKpfa",
+      "ts": "2025-11-30T12:28:19.285806+00:00"
+    },
+    {
+      "url": "https://gofile.io/d/XZAnhp",
+      "ts": "2025-11-30T12:28:19.285806+00:00"
+    },
+    {
+      "url": "https://gofile.io/d/BqyoBr",
+      "ts": "2025-11-30T12:28:19.285806+00:00"
+    },
+    {
+      "url": "https://gofile.io/d/4DGP9C",
+      "ts": "2025-11-30T12:28:19.285806+00:00"
     }
   ],
-  "line_seq": 961
+  "line_seq": 966
 }
