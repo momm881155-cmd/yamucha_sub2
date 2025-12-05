@@ -21,20 +21,6 @@ except ImportError:
 
 AFFILIATE_URLS: List[str] = [
     "https://www.effectivegatecpm.com/ra1dctjqd?key=7386f2c3cdf8ea912bbf6b2ab000fd44"
-    "https://www.effectivegatecpm.com/ra1dctjqd?key=7386f2c3cdf8ea912bbf6b2ab000fd44"
-    "https://www.effectivegatecpm.com/ra1dctjqd?key=7386f2c3cdf8ea912bbf6b2ab000fd44"
-    "https://www.effectivegatecpm.com/ra1dctjqd?key=7386f2c3cdf8ea912bbf6b2ab000fd44"
-    "https://www.effectivegatecpm.com/ra1dctjqd?key=7386f2c3cdf8ea912bbf6b2ab000fd44"
-    "https://www.effectivegatecpm.com/ra1dctjqd?key=7386f2c3cdf8ea912bbf6b2ab000fd44"
-    "https://www.effectivegatecpm.com/ra1dctjqd?key=7386f2c3cdf8ea912bbf6b2ab000fd44"
-    "https://www.effectivegatecpm.com/ra1dctjqd?key=7386f2c3cdf8ea912bbf6b2ab000fd44"
-    "https://www.effectivegatecpm.com/ra1dctjqd?key=7386f2c3cdf8ea912bbf6b2ab000fd44"
-    "https://www.effectivegatecpm.com/ra1dctjqd?key=7386f2c3cdf8ea912bbf6b2ab000fd44"
-    "https://www.effectivegatecpm.com/ra1dctjqd?key=7386f2c3cdf8ea912bbf6b2ab000fd44"
-    "https://www.effectivegatecpm.com/ra1dctjqd?key=7386f2c3cdf8ea912bbf6b2ab000fd44"
-    "https://www.effectivegatecpm.com/ra1dctjqd?key=7386f2c3cdf8ea912bbf6b2ab000fd44"
-    "https://www.effectivegatecpm.com/ra1dctjqd?key=7386f2c3cdf8ea912bbf6b2ab000fd44"
-    
 ]
 
 # =========================
@@ -132,6 +118,14 @@ def estimate_tweet_len_tco(text: str) -> int:
     def repl(m): return "U" * TCO_URL_LEN
     return len(re.sub(r"https?://\S+", repl, text))
 
+# ▼▼ ここからアフィ挟みロジック ▼▼
+
+def _pick_affiliate_url() -> str:
+    """AFFILIATE_URLS から1本選ぶ（1本しかなくても毎回使ってOK）"""
+    if not AFFILIATE_URLS:
+        return ""
+    return random.choice(AFFILIATE_URLS)
+
 def compose_fixed5_text(
     gofile_urls,
     start_seq: int,
@@ -142,22 +136,25 @@ def compose_fixed5_text(
     1ツイートの形:
       セリフ1行
       1. URL1
-      AFF1
+      AFF
       2. URL2
-      AFF2
-      ...
+      AFF
+      3. URL3
+      AFF
+      4. URL4
+
     ・URL 本数 = WANT_POST (最大)
-    ・Amazon 本数 = URL本数 - 1
-    ・セリフ & アフィリンクは毎回ランダム（ツイート内でアフィ被りなし）
-    ※番号は 1〜99 の範囲でループ（内部カウンタはそのまま）
+    ・アフィ本数 = URL本数 - 1 （URL1とURL2の間、…URL3とURL4の間）
+    ・AFFILIATE_URLS が1本でも、同じURLを複数回使う
     """
+
     urls = gofile_urls[:WANT_POST]
     if not urls:
         return "", 0
 
     invis = INVISIBLES[salt_idx % len(INVISIBLES)]
 
-    # 1〜99 に丸める関数
+    # 1〜99 に丸める関数（表示用の番号）
     def wrap_seq(n: int) -> int:
         n_int = int(n)
         if n_int < 1:
@@ -167,20 +164,12 @@ def compose_fixed5_text(
     # セリフ1つランダム
     serif = random.choice(SERIF_LIST) if SERIF_LIST else ""
 
-    # このツイートで必要な Amazon 本数 = URL 本数 - 1
-    need_aff = max(0, len(urls) - 1)
-    if need_aff > 0 and AFFILIATE_URLS:
-        aff_list = random.sample(AFFILIATE_URLS, k=min(need_aff, len(AFFILIATE_URLS)))
-    else:
-        aff_list = []
-
     lines: List[str] = []
 
     if serif:
         lines.append(serif)
 
     raw_seq = start_seq  # 内部カウンタ（state.line_seq）はそのまま使う
-    aff_idx = 0
 
     for i, u in enumerate(urls):
         # 表示用番号は 1〜99 にラップ
@@ -188,10 +177,11 @@ def compose_fixed5_text(
         lines.append(f"{disp_seq}{invis}. {u}")
         raw_seq += 1
 
-        # 次の URL との間に Amazon リンクを挟む
-        if i < len(urls) - 1 and aff_idx < len(aff_list):
-            lines.append(aff_list[aff_idx])
-            aff_idx += 1
+        # 最後のURL「以外」のときだけ、アフィリンクを1行挟む
+        if i < len(urls) - 1:
+            aff = _pick_affiliate_url()
+            if aff:
+                lines.append(aff)
 
     text = "\n".join(lines)
 
@@ -202,6 +192,8 @@ def compose_fixed5_text(
         text += sig
 
     return text, len(urls)
+
+# ▲▲ ここまで compose_fixed5_text ▲▲
 
 def get_client():
     return tweepy.Client(
