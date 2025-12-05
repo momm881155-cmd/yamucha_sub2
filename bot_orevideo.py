@@ -20,27 +20,7 @@ except ImportError:
 # =========================
 
 AFFILIATE_URLS: List[str] = [
-    "https://amzn.to/3XlQH0F",
-    "https://amzn.to/483idoA",
-    "https://amzn.to/3K4XlVQ",
-    "https://amzn.to/4okLzoB",
-    "https://amzn.to/448R2Y5",
-    "https://amzn.to/48lbyqY",
-    "https://amzn.to/47MpOsL",
-    "https://amzn.to/4oKKGX5",
-    "https://amzn.to/4oQRFhm",
-    "https://amzn.to/43xl8Ev",
-    "https://amzn.to/4r6DshP",
-    "https://amzn.to/3XFETpP",
-    "https://amzn.to/4pepNn5",
-    "https://amzn.to/4r1tuyp",
-    "https://amzn.to/487dSAN",
-    "https://amzn.to/4i72lWG",
-    "https://amzn.to/4i3iyfj",
-    "https://amzn.to/4874X25",
-    "https://amzn.to/49pCoiF",
-    "https://amzn.to/4plPKkR",
-    "https://amzn.to/4pekiVk",
+    "https://www.amazon.co.jp/Sunytree-【2025アップグレード版・大型6枚刃】けだまとり-液晶ディスプレイ付き-Type-C充電式-日本語取扱説明書付き/dp/B0FKRXZG62?ref=dlx_deals_dg_dcl_B0FKRXZG62_mw_sl13_ed_pi&pf_rd_r=VZEVCDPZGBF29JBNBPES&pf_rd_p=84196d3b-c469-4bca-9671-ced65d7a13ed"
 ]
 
 # =========================
