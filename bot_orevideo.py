@@ -21,6 +21,20 @@ except ImportError:
 
 AFFILIATE_URLS: List[str] = [
     "https://www.effectivegatecpm.com/ra1dctjqd?key=7386f2c3cdf8ea912bbf6b2ab000fd44"
+    "https://www.effectivegatecpm.com/ra1dctjqd?key=7386f2c3cdf8ea912bbf6b2ab000fd44"
+    "https://www.effectivegatecpm.com/ra1dctjqd?key=7386f2c3cdf8ea912bbf6b2ab000fd44"
+    "https://www.effectivegatecpm.com/ra1dctjqd?key=7386f2c3cdf8ea912bbf6b2ab000fd44"
+    "https://www.effectivegatecpm.com/ra1dctjqd?key=7386f2c3cdf8ea912bbf6b2ab000fd44"
+    "https://www.effectivegatecpm.com/ra1dctjqd?key=7386f2c3cdf8ea912bbf6b2ab000fd44"
+    "https://www.effectivegatecpm.com/ra1dctjqd?key=7386f2c3cdf8ea912bbf6b2ab000fd44"
+    "https://www.effectivegatecpm.com/ra1dctjqd?key=7386f2c3cdf8ea912bbf6b2ab000fd44"
+    "https://www.effectivegatecpm.com/ra1dctjqd?key=7386f2c3cdf8ea912bbf6b2ab000fd44"
+    "https://www.effectivegatecpm.com/ra1dctjqd?key=7386f2c3cdf8ea912bbf6b2ab000fd44"
+    "https://www.effectivegatecpm.com/ra1dctjqd?key=7386f2c3cdf8ea912bbf6b2ab000fd44"
+    "https://www.effectivegatecpm.com/ra1dctjqd?key=7386f2c3cdf8ea912bbf6b2ab000fd44"
+    "https://www.effectivegatecpm.com/ra1dctjqd?key=7386f2c3cdf8ea912bbf6b2ab000fd44"
+    "https://www.effectivegatecpm.com/ra1dctjqd?key=7386f2c3cdf8ea912bbf6b2ab000fd44"
+    
 ]
 
 # =========================
