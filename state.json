@@ -403,27 +403,16 @@
     "https://gofile.io/d/Mt6hpX",
     "https://gofile.io/d/nmobhq",
     "https://gofile.io/d/v2iSbz",
-    "https://gofile.io/d/F8rbwC"
+    "https://gofile.io/d/F8rbwC",
+    "https://gofile.io/d/jUC1v7",
+    "https://gofile.io/d/py0DGN",
+    "https://gofile.io/d/rUmQzB",
+    "https://video.twimg.com/amplify_video/1946455029931782144/vid/avc1/1920x1080/NTM2SvZdCpqK7Ee9.mp4?tag=21",
+    "https://video.twimg.com/amplify_video/1997223977287405569/vid/avc1/1920x1080/DbMWhDSrEa-1i7Zh.mp4?tag=21"
   ],
   "last_post_date": "2025-12-15",
-  "posts_today": 2,
+  "posts_today": 3,
   "recent_urls_24h": [
-    {
-      "url": "https://gofile.io/d/HaCwGx",
-      "ts": "2025-12-14T09:40:30.159247+00:00"
-    },
-    {
-      "url": "https://gofile.io/d/etGGve",
-      "ts": "2025-12-14T09:40:30.159247+00:00"
-    },
-    {
-      "url": "https://video.twimg.com/amplify_video/1942710274110169088/vid/avc1/720x1278/wn6k9wiXnJv3HLYl.mp4?tag=21",
-      "ts": "2025-12-14T09:40:30.159247+00:00"
-    },
-    {
-      "url": "https://video.twimg.com/amplify_video/1980974527824728064/vid/avc1/720x796/ObfHU_EXO5zLtyfv.mp4?tag=21",
-      "ts": "2025-12-14T09:40:30.159247+00:00"
-    },
     {
       "url": "https://gofile.io/d/BY8BmH",
       "ts": "2025-12-14T12:29:19.147283+00:00"
@@ -515,7 +504,27 @@
     {
       "url": "https://gofile.io/d/F8rbwC",
       "ts": "2025-12-14T21:18:56.886318+00:00"
+    },
+    {
+      "url": "https://gofile.io/d/jUC1v7",
+      "ts": "2025-12-14T22:32:31.129510+00:00"
+    },
+    {
+      "url": "https://gofile.io/d/py0DGN",
+      "ts": "2025-12-14T22:32:31.129510+00:00"
+    },
+    {
+      "url": "https://gofile.io/d/rUmQzB",
+      "ts": "2025-12-14T22:32:31.129510+00:00"
+    },
+    {
+      "url": "https://video.twimg.com/amplify_video/1946455029931782144/vid/avc1/1920x1080/NTM2SvZdCpqK7Ee9.mp4?tag=21",
+      "ts": "2025-12-14T22:32:31.129510+00:00"
+    },
+    {
+      "url": "https://video.twimg.com/amplify_video/1997223977287405569/vid/avc1/1920x1080/DbMWhDSrEa-1i7Zh.mp4?tag=21",
+      "ts": "2025-12-14T22:32:31.129510+00:00"
     }
   ],
-  "line_seq": 405
+  "line_seq": 410
 }
