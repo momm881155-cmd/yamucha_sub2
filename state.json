@@ -615,31 +615,16 @@
     "https://gofile.io/d/ONAQr2",
     "https://gofile.io/d/NRESRv",
     "https://gofile.io/d/FwLqAJ",
-    "https://gofile.io/d/Enh80Q"
+    "https://gofile.io/d/Enh80Q",
+    "https://gofile.io/d/EWnqHh",
+    "https://gofile.io/d/8Xit55",
+    "https://gofile.io/d/6WDQz8",
+    "https://video.twimg.com/amplify_video/1829159054343909376/vid/avc1/1920x1080/NQufQtBXVbd1QyrJ.mp4?tag=16",
+    "https://video.twimg.com/amplify_video/2000186143988715521/vid/avc1/1280x720/G9c4K6sR5MGHEs_0.mp4?tag=14"
   ],
   "last_post_date": "2025-12-18",
-  "posts_today": 11,
+  "posts_today": 12,
   "recent_urls_24h": [
-    {
-      "url": "https://gofile.io/d/TFXdvA",
-      "ts": "2025-12-17T21:21:54.375480+00:00"
-    },
-    {
-      "url": "https://gofile.io/d/T17tAj",
-      "ts": "2025-12-17T21:21:54.375480+00:00"
-    },
-    {
-      "url": "https://gofile.io/d/NxTM4J",
-      "ts": "2025-12-17T21:21:54.375480+00:00"
-    },
-    {
-      "url": "https://gofile.io/d/DiQkue",
-      "ts": "2025-12-17T21:21:54.375480+00:00"
-    },
-    {
-      "url": "https://gofile.io/d/AZV7xD",
-      "ts": "2025-12-17T21:21:54.375480+00:00"
-    },
     {
       "url": "https://gofile.io/d/9phsSI",
       "ts": "2025-12-17T22:35:33.159869+00:00"
@@ -819,7 +804,27 @@
     {
       "url": "https://gofile.io/d/Enh80Q",
       "ts": "2025-12-18T08:45:57.920474+00:00"
+    },
+    {
+      "url": "https://gofile.io/d/EWnqHh",
+      "ts": "2025-12-18T09:48:58.620557+00:00"
+    },
+    {
+      "url": "https://gofile.io/d/8Xit55",
+      "ts": "2025-12-18T09:48:58.620557+00:00"
+    },
+    {
+      "url": "https://gofile.io/d/6WDQz8",
+      "ts": "2025-12-18T09:48:58.620557+00:00"
+    },
+    {
+      "url": "https://video.twimg.com/amplify_video/1829159054343909376/vid/avc1/1920x1080/NQufQtBXVbd1QyrJ.mp4?tag=16",
+      "ts": "2025-12-18T09:48:58.620557+00:00"
+    },
+    {
+      "url": "https://video.twimg.com/amplify_video/2000186143988715521/vid/avc1/1280x720/G9c4K6sR5MGHEs_0.mp4?tag=14",
+      "ts": "2025-12-18T09:48:58.620557+00:00"
     }
   ],
-  "line_seq": 617
+  "line_seq": 622
 }
