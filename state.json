@@ -753,10 +753,15 @@
     "https://video.twimg.com/amplify_video/2000473986036318208/vid/avc1/464x688/YMiyhIssxAFhHeGX.mp4?tag=23",
     "https://video.twimg.com/amplify_video/2000261048809426949/vid/avc1/1280x720/MiwA0AqsbuPg7HD1.mp4?tag=21",
     "https://video.twimg.com/amplify_video/1993647874203320320/vid/avc1/720x1280/iMMREFpaFLxy7_fi.mp4?tag=21",
-    "https://video.twimg.com/amplify_video/1998751283663228929/vid/avc1/1080x1920/QssPgTHGFXAH-xO2.mp4?tag=21"
+    "https://video.twimg.com/amplify_video/1998751283663228929/vid/avc1/1080x1920/QssPgTHGFXAH-xO2.mp4?tag=21",
+    "https://gofile.io/d/dcXghJ",
+    "https://gofile.io/d/2F5qBA",
+    "https://video.twimg.com/amplify_video/1962333136383254528/vid/avc1/1920x1080/dWXG-WBkemboAE2E.mp4?tag=16",
+    "https://video.twimg.com/amplify_video/1975943391666999296/vid/avc1/1920x1080/BIt9vuVJSzr7lM9n.mp4?tag=21",
+    "https://video.twimg.com/amplify_video/2000611324225863680/vid/avc1/608x1080/KQU-V_IXIKbYIelG.mp4?tag=21"
   ],
   "last_post_date": "2025-12-21",
-  "posts_today": 6,
+  "posts_today": 7,
   "recent_urls_24h": [
     {
       "url": "https://gofile.io/d/rQ2USW",
@@ -877,7 +882,27 @@
     {
       "url": "https://video.twimg.com/amplify_video/1998751283663228929/vid/avc1/1080x1920/QssPgTHGFXAH-xO2.mp4?tag=21",
       "ts": "2025-12-21T03:22:21.879206+00:00"
+    },
+    {
+      "url": "https://gofile.io/d/dcXghJ",
+      "ts": "2025-12-21T04:08:25.288546+00:00"
+    },
+    {
+      "url": "https://gofile.io/d/2F5qBA",
+      "ts": "2025-12-21T04:08:25.288546+00:00"
+    },
+    {
+      "url": "https://video.twimg.com/amplify_video/1962333136383254528/vid/avc1/1920x1080/dWXG-WBkemboAE2E.mp4?tag=16",
+      "ts": "2025-12-21T04:08:25.288546+00:00"
+    },
+    {
+      "url": "https://video.twimg.com/amplify_video/1975943391666999296/vid/avc1/1920x1080/BIt9vuVJSzr7lM9n.mp4?tag=21",
+      "ts": "2025-12-21T04:08:25.288546+00:00"
+    },
+    {
+      "url": "https://video.twimg.com/amplify_video/2000611324225863680/vid/avc1/608x1080/KQU-V_IXIKbYIelG.mp4?tag=21",
+      "ts": "2025-12-21T04:08:25.288546+00:00"
     }
   ],
-  "line_seq": 755
+  "line_seq": 760
 }
