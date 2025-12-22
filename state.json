@@ -848,10 +848,15 @@
     "https://gofile.io/d/OanJyQ",
     "https://gofile.io/d/JXIm7M",
     "https://gofile.io/d/8kS7YO",
-    "https://video.twimg.com/ext_tw_video/1978772531848052736/pu/vid/avc1/714x1280/Mjm5sHsfWDSzAJPn.mp4?tag=12"
+    "https://video.twimg.com/ext_tw_video/1978772531848052736/pu/vid/avc1/714x1280/Mjm5sHsfWDSzAJPn.mp4?tag=12",
+    "https://gofile.io/d/GodffN",
+    "https://video.twimg.com/amplify_video/1978474065892655105/vid/avc1/1280x720/ds5ryYhEz-lfi4Ki.mp4?tag=21",
+    "https://video.twimg.com/amplify_video/2001493458213867520/vid/avc1/720x720/1kozBHvlVt0xL3ai.mp4?tag=21",
+    "https://video.twimg.com/amplify_video/2000100830444507136/vid/avc1/1920x1080/Ah4PGBfYkJCrFB_2.mp4?tag=21",
+    "https://video.twimg.com/amplify_video/2000457934300717056/vid/avc1/1920x1080/Gi_2HRRFHD4hqqVe.mp4?tag=21"
   ],
   "last_post_date": "2025-12-22",
-  "posts_today": 10,
+  "posts_today": 11,
   "recent_urls_24h": [
     {
       "url": "https://gofile.io/d/BziN09",
@@ -1032,7 +1037,27 @@
     {
       "url": "https://video.twimg.com/ext_tw_video/1978772531848052736/pu/vid/avc1/714x1280/Mjm5sHsfWDSzAJPn.mp4?tag=12",
       "ts": "2025-12-22T12:32:52.143003+00:00"
+    },
+    {
+      "url": "https://gofile.io/d/GodffN",
+      "ts": "2025-12-22T14:46:22.495769+00:00"
+    },
+    {
+      "url": "https://video.twimg.com/amplify_video/1978474065892655105/vid/avc1/1280x720/ds5ryYhEz-lfi4Ki.mp4?tag=21",
+      "ts": "2025-12-22T14:46:22.495769+00:00"
+    },
+    {
+      "url": "https://video.twimg.com/amplify_video/2001493458213867520/vid/avc1/720x720/1kozBHvlVt0xL3ai.mp4?tag=21",
+      "ts": "2025-12-22T14:46:22.495769+00:00"
+    },
+    {
+      "url": "https://video.twimg.com/amplify_video/2000100830444507136/vid/avc1/1920x1080/Ah4PGBfYkJCrFB_2.mp4?tag=21",
+      "ts": "2025-12-22T14:46:22.495769+00:00"
+    },
+    {
+      "url": "https://video.twimg.com/amplify_video/2000457934300717056/vid/avc1/1920x1080/Gi_2HRRFHD4hqqVe.mp4?tag=21",
+      "ts": "2025-12-22T14:46:22.495769+00:00"
     }
   ],
-  "line_seq": 850
+  "line_seq": 855
 }
