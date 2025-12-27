@@ -1103,10 +1103,15 @@
     "https://video.twimg.com/ext_tw_video/1687501134611836928/pu/vid/720x1280/4G4dFG80W2Eo0Ppa.mp4?tag=12",
     "https://video.twimg.com/ext_tw_video/1680120589586173958/pu/vid/720x1280/Kt56eME2lWCVzTdP.mp4?tag=12",
     "https://video.twimg.com/ext_tw_video/1864295847539945472/pu/vid/avc1/720x1280/5NkyDB8smUeRtUIk.mp4?tag=12",
-    "https://video.twimg.com/amplify_video/2000105119049039872/vid/avc1/1280x720/RlkgpaI5Nix0LUIZ.mp4?tag=21"
+    "https://video.twimg.com/amplify_video/2000105119049039872/vid/avc1/1280x720/RlkgpaI5Nix0LUIZ.mp4?tag=21",
+    "https://video.twimg.com/amplify_video/2004585734402109440/vid/avc1/1280x720/hr4-cNRxSmGsZ31z.mp4?tag=21",
+    "https://video.twimg.com/amplify_video/2004089148983201795/vid/avc1/1920x1080/1-4MoszQLwDVCXe3.mp4?tag=21",
+    "https://video.twimg.com/amplify_video/1985218265220878336/vid/avc1/1280x720/8xUwNKedd3JbBM4f.mp4?tag=21",
+    "https://video.twimg.com/amplify_video/1997535614913347584/vid/avc1/1280x720/HDPHf3h48GR2gKjL.mp4?tag=21",
+    "https://video.twimg.com/amplify_video/2004601582076518400/vid/avc1/720x960/r45D4h-r81fXOdRt.mp4?tag=14"
   ],
   "last_post_date": "2025-12-27",
-  "posts_today": 8,
+  "posts_today": 9,
   "recent_urls_24h": [
     {
       "url": "https://gofile.io/d/i9RkeI",
@@ -1227,7 +1232,27 @@
     {
       "url": "https://video.twimg.com/amplify_video/2000105119049039872/vid/avc1/1280x720/RlkgpaI5Nix0LUIZ.mp4?tag=21",
       "ts": "2025-12-27T12:29:55.040171+00:00"
+    },
+    {
+      "url": "https://video.twimg.com/amplify_video/2004585734402109440/vid/avc1/1280x720/hr4-cNRxSmGsZ31z.mp4?tag=21",
+      "ts": "2025-12-27T13:39:21.782507+00:00"
+    },
+    {
+      "url": "https://video.twimg.com/amplify_video/2004089148983201795/vid/avc1/1920x1080/1-4MoszQLwDVCXe3.mp4?tag=21",
+      "ts": "2025-12-27T13:39:21.782507+00:00"
+    },
+    {
+      "url": "https://video.twimg.com/amplify_video/1985218265220878336/vid/avc1/1280x720/8xUwNKedd3JbBM4f.mp4?tag=21",
+      "ts": "2025-12-27T13:39:21.782507+00:00"
+    },
+    {
+      "url": "https://video.twimg.com/amplify_video/1997535614913347584/vid/avc1/1280x720/HDPHf3h48GR2gKjL.mp4?tag=21",
+      "ts": "2025-12-27T13:39:21.782507+00:00"
+    },
+    {
+      "url": "https://video.twimg.com/amplify_video/2004601582076518400/vid/avc1/720x960/r45D4h-r81fXOdRt.mp4?tag=14",
+      "ts": "2025-12-27T13:39:21.782507+00:00"
     }
   ],
-  "line_seq": 1105
+  "line_seq": 1110
 }
