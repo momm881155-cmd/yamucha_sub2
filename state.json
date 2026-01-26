@@ -2553,10 +2553,15 @@
     "https://video.twimg.com/amplify_video/1973390995598483457/vid/avc1/1920x1080/Or3B4p7IIoKbF0cy.mp4?tag=21",
     "https://video.twimg.com/amplify_video/1973383623471669252/vid/avc1/1920x1080/A1yN6p86ZtqlHLbY.mp4?tag=21",
     "https://video.twimg.com/amplify_video/1973013756864282624/vid/avc1/1920x1080/t-zo29jckR2Q-4Gu.mp4?tag=21",
-    "https://video.twimg.com/ext_tw_video/1903284394749730816/pu/vid/avc1/750x720/IH0RMEpB6mg1hYNg.mp4?tag=12"
+    "https://video.twimg.com/ext_tw_video/1903284394749730816/pu/vid/avc1/750x720/IH0RMEpB6mg1hYNg.mp4?tag=12",
+    "https://gofile.io/d/RbBV77",
+    "https://gofile.io/d/1rDeE1",
+    "https://video.twimg.com/amplify_video/1751970673361309696/vid/avc1/1280x720/-vojsZUhmCskoGNZ.mp4?tag=14",
+    "https://video.twimg.com/amplify_video/1985362827973218304/vid/avc1/1280x720/PABF2KXEh3glYeOF.mp4?tag=21",
+    "https://video.twimg.com/amplify_video/1991903558292385792/vid/avc1/1920x1080/Q169naLHACS1Huj6.mp4?tag=21"
   ],
   "last_post_date": "2026-01-26",
-  "posts_today": 7,
+  "posts_today": 8,
   "recent_urls_24h": [
     {
       "url": "https://gofile.io/d/ZO1WUX",
@@ -2677,7 +2682,27 @@
     {
       "url": "https://video.twimg.com/ext_tw_video/1903284394749730816/pu/vid/avc1/750x720/IH0RMEpB6mg1hYNg.mp4?tag=12",
       "ts": "2026-01-26T08:50:53.893404+00:00"
+    },
+    {
+      "url": "https://gofile.io/d/RbBV77",
+      "ts": "2026-01-26T09:56:19.270763+00:00"
+    },
+    {
+      "url": "https://gofile.io/d/1rDeE1",
+      "ts": "2026-01-26T09:56:19.270763+00:00"
+    },
+    {
+      "url": "https://video.twimg.com/amplify_video/1751970673361309696/vid/avc1/1280x720/-vojsZUhmCskoGNZ.mp4?tag=14",
+      "ts": "2026-01-26T09:56:19.270763+00:00"
+    },
+    {
+      "url": "https://video.twimg.com/amplify_video/1985362827973218304/vid/avc1/1280x720/PABF2KXEh3glYeOF.mp4?tag=21",
+      "ts": "2026-01-26T09:56:19.270763+00:00"
+    },
+    {
+      "url": "https://video.twimg.com/amplify_video/1991903558292385792/vid/avc1/1920x1080/Q169naLHACS1Huj6.mp4?tag=21",
+      "ts": "2026-01-26T09:56:19.270763+00:00"
     }
   ],
-  "line_seq": 2555
+  "line_seq": 2560
 }
