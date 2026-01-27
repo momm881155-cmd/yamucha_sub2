@@ -2608,10 +2608,15 @@
     "https://video.twimg.com/amplify_video/2015041157613678592/vid/avc1/720x960/1SnZ0T4zBX-gGRdm.mp4?tag=21",
     "https://video.twimg.com/amplify_video/2008516748329578505/vid/avc1/1250x704/OrYPt8ygqGFvXuAc.mp4?tag=21",
     "https://video.twimg.com/amplify_video/2014148767109554176/vid/avc1/720x1280/3QNtTwgd---DiP1x.mp4?tag=14",
-    "https://video.twimg.com/amplify_video/2010201300559163392/vid/avc1/720x1274/MJjoLWMlzy2QYd2B.mp4?tag=14"
+    "https://video.twimg.com/amplify_video/2010201300559163392/vid/avc1/720x1274/MJjoLWMlzy2QYd2B.mp4?tag=14",
+    "https://gofile.io/d/4zNR3k",
+    "https://gofile.io/d/4iFQOC",
+    "https://video.twimg.com/amplify_video/1987835087443111936/vid/avc1/720x1280/zmQoS6H026Y6ckUj.mp4?tag=14",
+    "https://video.twimg.com/ext_tw_video/2016023268113756161/pu/vid/avc1/640x336/6tNSlrFiec50t_e3.mp4?tag=12",
+    "https://video.twimg.com/ext_tw_video/2015993648270200832/pu/vid/avc1/848x624/RVeMHyPr3XOGCxnG.mp4?tag=12"
   ],
   "last_post_date": "2026-01-27",
-  "posts_today": 6,
+  "posts_today": 7,
   "recent_urls_24h": [
     {
       "url": "https://gofile.io/d/LnkwQL",
@@ -2712,7 +2717,27 @@
     {
       "url": "https://video.twimg.com/amplify_video/2010201300559163392/vid/avc1/720x1274/MJjoLWMlzy2QYd2B.mp4?tag=14",
       "ts": "2026-01-27T07:21:06.021738+00:00"
+    },
+    {
+      "url": "https://gofile.io/d/4zNR3k",
+      "ts": "2026-01-27T08:50:34.101653+00:00"
+    },
+    {
+      "url": "https://gofile.io/d/4iFQOC",
+      "ts": "2026-01-27T08:50:34.101653+00:00"
+    },
+    {
+      "url": "https://video.twimg.com/amplify_video/1987835087443111936/vid/avc1/720x1280/zmQoS6H026Y6ckUj.mp4?tag=14",
+      "ts": "2026-01-27T08:50:34.101653+00:00"
+    },
+    {
+      "url": "https://video.twimg.com/ext_tw_video/2016023268113756161/pu/vid/avc1/640x336/6tNSlrFiec50t_e3.mp4?tag=12",
+      "ts": "2026-01-27T08:50:34.101653+00:00"
+    },
+    {
+      "url": "https://video.twimg.com/ext_tw_video/2015993648270200832/pu/vid/avc1/848x624/RVeMHyPr3XOGCxnG.mp4?tag=12",
+      "ts": "2026-01-27T08:50:34.101653+00:00"
     }
   ],
-  "line_seq": 2610
+  "line_seq": 2615
 }
