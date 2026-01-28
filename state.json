@@ -2658,10 +2658,15 @@
     "https://video.twimg.com/amplify_video/2012826048249876483/vid/avc1/1280x720/b0y46vYV0eM1PZ2V.mp4?tag=21",
     "https://video.twimg.com/amplify_video/1983853000130228228/vid/avc1/1920x1080/cIQmQNn-omseeJds.mp4?tag=21",
     "https://video.twimg.com/amplify_video/1982844929165447168/vid/avc1/1920x1080/DojC1MGR8-Y2PvaB.mp4?tag=21",
-    "https://video.twimg.com/amplify_video/1982385722154725376/vid/avc1/1920x1080/sFc-qMiHOJz9FKU4.mp4?tag=21"
+    "https://video.twimg.com/amplify_video/1982385722154725376/vid/avc1/1920x1080/sFc-qMiHOJz9FKU4.mp4?tag=21",
+    "https://gofile.io/d/9NvQXN",
+    "https://gofile.io/d/graMAG",
+    "https://video.twimg.com/amplify_video/1997900806092361728/vid/avc1/1080x1920/vvq-URxbXOAfCl5G.mp4?tag=21",
+    "https://video.twimg.com/amplify_video/1982056716049973248/vid/avc1/1920x1080/W5HF-N8SOaK6z3MS.mp4?tag=21",
+    "https://video.twimg.com/amplify_video/1982050971778748416/vid/avc1/1920x1080/ZUc5rPzUCqoDITCN.mp4?tag=21"
   ],
   "last_post_date": "2026-01-28",
-  "posts_today": 6,
+  "posts_today": 7,
   "recent_urls_24h": [
     {
       "url": "https://gofile.io/d/nVr2ni",
@@ -2782,7 +2787,27 @@
     {
       "url": "https://video.twimg.com/amplify_video/1982385722154725376/vid/avc1/1920x1080/sFc-qMiHOJz9FKU4.mp4?tag=21",
       "ts": "2026-01-28T03:28:01.293646+00:00"
+    },
+    {
+      "url": "https://gofile.io/d/9NvQXN",
+      "ts": "2026-01-28T04:15:11.237761+00:00"
+    },
+    {
+      "url": "https://gofile.io/d/graMAG",
+      "ts": "2026-01-28T04:15:11.237761+00:00"
+    },
+    {
+      "url": "https://video.twimg.com/amplify_video/1997900806092361728/vid/avc1/1080x1920/vvq-URxbXOAfCl5G.mp4?tag=21",
+      "ts": "2026-01-28T04:15:11.237761+00:00"
+    },
+    {
+      "url": "https://video.twimg.com/amplify_video/1982056716049973248/vid/avc1/1920x1080/W5HF-N8SOaK6z3MS.mp4?tag=21",
+      "ts": "2026-01-28T04:15:11.237761+00:00"
+    },
+    {
+      "url": "https://video.twimg.com/amplify_video/1982050971778748416/vid/avc1/1920x1080/ZUc5rPzUCqoDITCN.mp4?tag=21",
+      "ts": "2026-01-28T04:15:11.237761+00:00"
     }
   ],
-  "line_seq": 2660
+  "line_seq": 2665
 }
