@@ -3343,10 +3343,15 @@
     "https://video.twimg.com/ext_tw_video/1695218183152562176/pu/vid/1280x720/D-QAe_U_iP5jtS4n.mp4?tag=12",
     "https://video.twimg.com/amplify_video/2005925261326614528/vid/avc1/1280x720/LNgHS4s__rJ5HMfN.mp4?tag=14",
     "https://video.twimg.com/amplify_video/2004810836733546496/vid/avc1/1278x720/P4cMqPp7AXwhSDOb.mp4?tag=14",
-    "https://video.twimg.com/amplify_video/2019234284918226945/vid/avc1/576x1024/S6tD5fD7ovhMaR0j.mp4?tag=21"
+    "https://video.twimg.com/amplify_video/2019234284918226945/vid/avc1/576x1024/S6tD5fD7ovhMaR0j.mp4?tag=21",
+    "https://gofile.io/d/HVOtur",
+    "https://gofile.io/d/TYdDWq",
+    "https://video.twimg.com/amplify_video/2020048250573856769/vid/avc1/1280x720/ZC35Vs_L_FQJmBgV.mp4?tag=21",
+    "https://video.twimg.com/amplify_video/2018349464830795776/vid/avc1/1920x1080/KxOBQaSZXztyGk-3.mp4?tag=21",
+    "https://video.twimg.com/amplify_video/2019437376871821312/vid/avc1/2160x3840/NJ2gFo4UXq1KJ_hv.mp4?tag=21"
   ],
   "last_post_date": "2026-02-08",
-  "posts_today": 7,
+  "posts_today": 8,
   "recent_urls_24h": [
     {
       "url": "https://gofile.io/d/ceTot9",
@@ -3467,7 +3472,27 @@
     {
       "url": "https://video.twimg.com/amplify_video/2019234284918226945/vid/avc1/576x1024/S6tD5fD7ovhMaR0j.mp4?tag=21",
       "ts": "2026-02-08T06:30:10.791983+00:00"
+    },
+    {
+      "url": "https://gofile.io/d/HVOtur",
+      "ts": "2026-02-08T07:33:33.910025+00:00"
+    },
+    {
+      "url": "https://gofile.io/d/TYdDWq",
+      "ts": "2026-02-08T07:33:33.910025+00:00"
+    },
+    {
+      "url": "https://video.twimg.com/amplify_video/2020048250573856769/vid/avc1/1280x720/ZC35Vs_L_FQJmBgV.mp4?tag=21",
+      "ts": "2026-02-08T07:33:33.910025+00:00"
+    },
+    {
+      "url": "https://video.twimg.com/amplify_video/2018349464830795776/vid/avc1/1920x1080/KxOBQaSZXztyGk-3.mp4?tag=21",
+      "ts": "2026-02-08T07:33:33.910025+00:00"
+    },
+    {
+      "url": "https://video.twimg.com/amplify_video/2019437376871821312/vid/avc1/2160x3840/NJ2gFo4UXq1KJ_hv.mp4?tag=21",
+      "ts": "2026-02-08T07:33:33.910025+00:00"
     }
   ],
-  "line_seq": 3345
+  "line_seq": 3350
 }
